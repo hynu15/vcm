@@ -24,6 +24,16 @@ logs/
 data/
 outputs/
 models/
+*.pth
+*.pt
+*.onnx
+*.npy
+*.npz
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
 
 # IDE/editor
 .vscode/
