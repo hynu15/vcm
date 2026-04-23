@@ -212,7 +212,7 @@ score = Δ SA-PSNR_vs_Trad - λ × Δ Bitrate_vs_Trad
   brew install ffmpeg --with-x265
   ```
 
-**Error**: `Model not found: models/best_ccnet.pth`
+**Error**: `Model not found: models/best_pidnet.pth`
 - Solution: Train the segmentation model first (see train_segmentation.py)
 
 **Error**: `Image directory not found`

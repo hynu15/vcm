@@ -8,7 +8,7 @@ from torchvision import transforms
 from PIL import Image
 import pandas as pd
 from tqdm import tqdm
-from train_segmentation import CCNet
+from train_segmentation import load_segmentation_model
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -23,24 +23,15 @@ def resolve_existing_file(candidates):
 # ====================== Load model để lấy mask ======================
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-model_path = os.path.join(PROJECT_ROOT, 'models', 'best_ccnet.pth')
-if not os.path.isfile(model_path):
-    raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
+model_path = resolve_existing_file([
+    os.path.join(PROJECT_ROOT, 'models', 'best_pidnet.pth'),
+    os.path.join(PROJECT_ROOT, 'models', 'best_ccnet.pth'),
+])
+if model_path is None:
+    raise FileNotFoundError("Không tìm thấy model: models/best_pidnet.pth hoặc models/best_ccnet.pth")
 
-try:
-    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-except TypeError:
-    checkpoint = torch.load(model_path, map_location=device)
-
-if isinstance(checkpoint, dict):
-    model = CCNet(num_classes=4, backbone_weights=None)
-    state_dict = checkpoint.get('model_state_dict', checkpoint)
-    model.load_state_dict(state_dict)
-else:
-    model = checkpoint
-
-model = model.to(device)
-model.eval()
+model, model_name = load_segmentation_model(model_path, device=device, num_classes=4)
+print(f"Dùng segmentation model: {model_name} | {model_path}")
 
 transform = transforms.Compose([
     transforms.Resize((512, 1024)),

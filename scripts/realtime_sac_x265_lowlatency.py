@@ -15,7 +15,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
-from train_segmentation import CCNet
+from train_segmentation import load_segmentation_model
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default=os.path.join(PROJECT_ROOT, "models", "best_ccnet.pth"),
+        default=os.path.join(PROJECT_ROOT, "models", "best_pidnet.pth"),
         help="Path to trained segmentation model.",
     )
     parser.add_argument(
@@ -162,20 +162,16 @@ def read_video_frames(video_path: str, expected_frames: int) -> List[np.ndarray]
     return frames
 
 
-def load_model(model_path: str, device: torch.device) -> CCNet:
-    if not os.path.isfile(model_path):
-        raise FileNotFoundError(f"Model not found: {model_path}")
+def load_model(model_path: str, device: torch.device):
+    resolved = model_path
+    if not os.path.isfile(resolved):
+        legacy = os.path.join(PROJECT_ROOT, "models", "best_ccnet.pth")
+        if not os.path.isfile(legacy):
+            raise FileNotFoundError(f"Model not found: {resolved} or {legacy}")
+        resolved = legacy
 
-    try:
-        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-    except TypeError:
-        checkpoint = torch.load(model_path, map_location=device)
-
-    model = CCNet(num_classes=4, backbone_weights=None)
-    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
+    model, model_name = load_segmentation_model(resolved, device=device, num_classes=4)
+    print(f"Using segmentation model: {model_name} | {resolved}")
     return model
 
 
@@ -190,7 +186,7 @@ def build_transform(input_h: int, input_w: int) -> transforms.Compose:
 
 
 def infer_roi_mask(
-    model: CCNet,
+    model,
     frame_rgb: np.ndarray,
     transform: transforms.Compose,
     device: torch.device,

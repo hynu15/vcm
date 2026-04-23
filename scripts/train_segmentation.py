@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
-# ====================== CCNet Module (theo paper Fig.3) ======================
+# ====================== Legacy CCNet (ResNet101) ======================
 class CrissCrossAttention(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -31,7 +31,8 @@ class CrissCrossAttention(nn.Module):
         out = out.view(B, C, H, W)
         return self.gamma * out + x
 
-class CCNet(nn.Module):
+
+class LegacyCCNetResNet101(nn.Module):
     def __init__(self, num_classes=4, backbone_weights='IMAGENET1K_V1'):
         super().__init__()
         resnet = models.resnet101(weights=backbone_weights)
@@ -47,6 +48,154 @@ class CCNet(nn.Module):
         x = self.conv(x)              # [B, 4, H/32, W/32]
         x = F.interpolate(x, scale_factor=32, mode='bilinear', align_corners=True)
         return x
+
+
+# ====================== Lightweight PID-style Segmentor ======================
+class ConvBNReLU(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, dilation=1, groups=1):
+        super().__init__()
+        padding = ((kernel_size - 1) // 2) * dilation
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_ch,
+                out_ch,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1, dilation=1):
+        super().__init__()
+        self.dw = ConvBNReLU(in_ch, in_ch, kernel_size=3, stride=stride, dilation=dilation, groups=in_ch)
+        self.pw = ConvBNReLU(in_ch, out_ch, kernel_size=1, stride=1)
+
+    def forward(self, x):
+        return self.pw(self.dw(x))
+
+
+class PIDNetSegmentor(nn.Module):
+    """
+    Lightweight PID-style segmentation network:
+    - P branch: high-resolution detail cues
+    - I branch: low-resolution semantic context
+    - D branch: boundary/detail enhancement
+    """
+
+    def __init__(self, num_classes=4, channels=32):
+        super().__init__()
+        p_ch = channels
+        i_ch = channels * 4
+        d_ch = channels * 2
+
+        # Shared stem to 1/4 resolution.
+        self.stem = nn.Sequential(
+            ConvBNReLU(3, channels, kernel_size=3, stride=2),
+            ConvBNReLU(channels, channels * 2, kernel_size=3, stride=2),
+        )
+
+        # P (detail) branch keeps 1/4 resolution.
+        self.p_branch = nn.Sequential(
+            ConvBNReLU(channels * 2, p_ch, kernel_size=3, stride=1),
+            ConvBNReLU(p_ch, p_ch, kernel_size=3, stride=1),
+        )
+
+        # I (context) branch goes to 1/8 resolution.
+        self.i_branch = nn.Sequential(
+            DepthwiseSeparableConv(channels * 2, i_ch // 2, stride=2),
+            DepthwiseSeparableConv(i_ch // 2, i_ch, stride=1),
+            DepthwiseSeparableConv(i_ch, i_ch, stride=1, dilation=2),
+        )
+
+        # D (boundary/detail enhancement) branch.
+        self.d_branch = nn.Sequential(
+            ConvBNReLU(channels * 2, d_ch, kernel_size=3, stride=1, dilation=2),
+            ConvBNReLU(d_ch, d_ch, kernel_size=3, stride=1),
+        )
+
+        self.i_to_p = ConvBNReLU(i_ch, p_ch, kernel_size=1)
+        self.fuse = nn.Sequential(
+            ConvBNReLU(p_ch + p_ch + d_ch, channels * 3, kernel_size=3),
+            nn.Conv2d(channels * 3, num_classes, kernel_size=1),
+        )
+
+    def forward(self, x):
+        in_h, in_w = x.shape[-2:]
+        feat_1_4 = self.stem(x)
+
+        p_feat = self.p_branch(feat_1_4)
+        d_feat = self.d_branch(feat_1_4)
+
+        i_feat = self.i_branch(feat_1_4)
+        i_up = F.interpolate(self.i_to_p(i_feat), size=p_feat.shape[-2:], mode='bilinear', align_corners=False)
+
+        fused = torch.cat([p_feat, i_up, d_feat], dim=1)
+        logits = self.fuse(fused)
+        logits = F.interpolate(logits, size=(in_h, in_w), mode='bilinear', align_corners=False)
+        return logits
+
+
+class CCNet(nn.Module):
+    """Backward-compatible alias: old code imports CCNet, now default to PIDNetSegmentor."""
+
+    def __init__(self, num_classes=4, backbone_weights=None):
+        super().__init__()
+        self.model = PIDNetSegmentor(num_classes=num_classes)
+
+    def forward(self, x):
+        return self.model(x)
+
+
+def build_segmentation_model(model_name='pidnet_s', num_classes=4, backbone_weights=None):
+    name = model_name.lower()
+    if name in ('pidnet', 'pidnet_s', 'pidnet-small'):
+        return PIDNetSegmentor(num_classes=num_classes)
+    if name in ('ccnet', 'resnet101', 'ccnet_resnet101'):
+        return LegacyCCNetResNet101(num_classes=num_classes, backbone_weights=backbone_weights)
+    raise ValueError(f"Unknown model_name={model_name}")
+
+
+def infer_model_name_from_state_dict(state_dict):
+    keys = list(state_dict.keys())
+    if any(k.startswith('backbone.') or k.startswith('cc1.') or k.startswith('cc2.') for k in keys):
+        return 'ccnet'
+    return 'pidnet_s'
+
+
+def load_segmentation_model(model_path, device, num_classes=4, default_model='pidnet_s'):
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
+
+    try:
+        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(model_path, map_location=device)
+
+    model_name = default_model
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        meta = checkpoint.get('meta', {}) if isinstance(checkpoint.get('meta', {}), dict) else {}
+        model_name = meta.get('model_name', infer_model_name_from_state_dict(state_dict))
+    else:
+        state_dict = checkpoint
+        if isinstance(state_dict, dict):
+            model_name = infer_model_name_from_state_dict(state_dict)
+
+    model = build_segmentation_model(model_name=model_name, num_classes=num_classes, backbone_weights=None)
+    model.load_state_dict(state_dict)
+    model = model.to(device)
+    model.eval()
+    return model, model_name
 
 # ====================== Dataset ======================
 class Cityscapes4Class(Dataset):
@@ -101,27 +250,40 @@ if __name__ == "__main__":
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
     print(f"Đang dùng: {device} - {device_name}")
 
-    # Đường dẫn
-    IMAGE_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "leftImg8bit_trainvaltest", "leftImg8bit", "val")
-    LABEL_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "val")
+    # Đường dẫn split chuẩn: train để học, val để đánh giá
+    IMAGE_TRAIN_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "leftImg8bit_trainvaltest", "leftImg8bit", "train")
+    LABEL_TRAIN_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "train")
+    IMAGE_VAL_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "leftImg8bit_trainvaltest", "leftImg8bit", "val")
+    LABEL_VAL_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "val")
     MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
     os.makedirs(MODEL_DIR, exist_ok=True)
     IMAGE_SIZE = (512, 1024)
+    NUM_EPOCHS = 100
 
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    dataset = Cityscapes4Class(IMAGE_DIR, LABEL_DIR, transform, image_size=IMAGE_SIZE)
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
+    train_ds = Cityscapes4Class(IMAGE_TRAIN_DIR, LABEL_TRAIN_DIR, transform, image_size=IMAGE_SIZE)
+    val_ds = Cityscapes4Class(IMAGE_VAL_DIR, LABEL_VAL_DIR, transform, image_size=IMAGE_SIZE)
+
+    if len(train_ds) == 0:
+        raise RuntimeError(
+            "Train dataset rỗng. Hãy chuẩn bị nhãn 4-class cho split train tại data/gt_4class/train."
+        )
+    if len(val_ds) == 0:
+        raise RuntimeError(
+            "Val dataset rỗng. Hãy kiểm tra dữ liệu tại data/gt_4class/val."
+        )
+
+    print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
 
     train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, num_workers=4, pin_memory=True)
 
-    model = CCNet(num_classes=4).to(device)
+    model_name = 'pidnet_s'
+    model = build_segmentation_model(model_name=model_name, num_classes=4, backbone_weights=None).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-5)
     scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
 
@@ -134,9 +296,9 @@ if __name__ == "__main__":
         return bce + dice.mean()
 
     best_miou = 0
-    for epoch in range(10):
+    for epoch in range(NUM_EPOCHS):
         model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/10")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS}")
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -171,7 +333,16 @@ if __name__ == "__main__":
 
         if mean_iou > best_miou:
             best_miou = mean_iou
-            torch.save(model.state_dict(), os.path.join(MODEL_DIR, "best_ccnet.pth"))
+            torch.save(
+                {
+                    'model_state_dict': model.state_dict(),
+                    'meta': {
+                        'model_name': model_name,
+                        'num_classes': 4,
+                    },
+                },
+                os.path.join(MODEL_DIR, 'best_pidnet.pth'),
+            )
             print(f"✅ Lưu model tốt nhất: mIOU = {best_miou:.4f}")
 
-    print(f"✅ Hoàn thành training! Model lưu tại: {os.path.join(MODEL_DIR, 'best_ccnet.pth')}")
+    print(f"✅ Hoàn thành training! Model lưu tại: {os.path.join(MODEL_DIR, 'best_pidnet.pth')}")

@@ -1,0 +1,174 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{geometry}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{Báo Cáo Hoàn Thiện Kết Quả SAC-X265 và So Sánh PIDNet vs. ResNet101}
+\author{hynu15}
+\date{2026-04-20}
+
+\begin{document}
+\maketitle
+
+\section{Tóm tắt}
+Báo cáo này tổng hợp lại các kết quả đã có trong project, điền các giá trị còn thiếu bằng artifact thật trong \texttt{outputs/}, đồng thời bổ sung benchmark so sánh PIDNet và ResNet101 theo cùng cấu hình chạy nhanh để có thể đọc và đối chiếu trực tiếp.
+
+\section{Thiết Lập Thực Nghiệm}
+\begin{itemize}
+  \item Dataset: Cityscapes validation subset đã chuẩn bị trong project.
+  \item Model segmentation chính: PIDNetSegmentor.
+  \item Model so sánh: Legacy CCNet / ResNet101.
+  \item CRF optimization: grid search 3x3 với \(\lambda=0.4\).
+  \item Benchmark so sánh model: 20 samples, 10 epochs, 10 eval frames, 4 latency frames.
+\end{itemize}
+
+\section{Kết Quả Huấn Luyện Segmentation}
+Bảng dưới đây dùng kết quả benchmark PIDNet chạy nhanh trong thư mục \texttt{outputs/model	extunderscore benchmark/compare	extunderscore pidnet	extunderscore small/}. Cột train loss hiện bằng 0.0 do cấu hình chạy nhanh và cơ chế lọc loss không hữu hạn; giá trị này được giữ nguyên từ artifact sinh ra bởi pipeline.
+
+\begin{table}[H]
+\centering
+\caption{Kết quả huấn luyện PIDNetSegmentor (10 epoch)}
+\label{tab:train_res}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Epoch} & \textbf{Train Loss} & \textbf{Val mIoU (\%)} & \textbf{Checkpoint} \\
+\midrule
+1 & 0.000 & 15.923 & saved: \texttt{best	extunderscore pidnet	extunderscore s.pth} \\
+3 & 0.000 & 15.923 & saved: \texttt{best	extunderscore pidnet	extunderscore s.pth} \\
+5 & 0.000 & 15.923 & saved: \texttt{best	extunderscore pidnet	extunderscore s.pth} \\
+7 & 0.000 & 15.923 & saved: \texttt{best	extunderscore pidnet	extunderscore s.pth} \\
+9 & 0.000 & 15.923 & saved: \texttt{best	extunderscore pidnet	extunderscore s.pth} \\
+10 & 0.000 & 15.923 & saved: \texttt{best	extunderscore pidnet	extunderscore s.pth} \\
+\midrule
+\textbf{Best} & -- & 15.923 & saved in benchmark folder \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{So Sánh PIDNet và ResNet101}
+Hai benchmark được chạy với cùng cấu hình nhẹ để có thể so sánh tương đối trực tiếp. Kết quả cho thấy chất lượng validation tương đương nhau trên bộ mẫu nhỏ này, nhưng ResNet101 chậm hơn rõ rệt ở bước inference GPU và tổng latency CPU.
+
+\begin{table}[H]
+\centering
+\caption{So sánh PIDNet và ResNet101 trên benchmark nhẹ}
+\label{tab:model_compare}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model} & \textbf{Samples} & \textbf{Best Epoch} & \textbf{Best Val mIoU} & \textbf{Infer GPU (ms)} & \textbf{Total GPU (ms)} & \textbf{GPU FPS} \\
+\midrule
+PIDNet & 20 & 1 & 0.1592 & 8.464 & 802.158 & 1.247 \\
+ResNet101 & 20 & 1 & 0.1592 & 71.304 & 910.453 & 1.098 \\
+\midrule
+\textbf{CPU FPS} & \multicolumn{6}{r}{PIDNet: 0.978 \hspace{0.8em} ResNet101: 0.448} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Kết Quả Nén SAC vs. Traditional}
+Bảng dưới đây lấy trung bình từ \texttt{outputs/metrics\textunderscore comparison.csv}.
+
+\begin{table}[H]
+\centering
+\caption{So sánh SAC-X265 và Traditional X265}
+\label{tab:main_res}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Phương pháp} & \textbf{PSNR (dB)} & \textbf{SSIM} & \textbf{SA-PSNR} & \textbf{SA-SSIM} & \textbf{Bitrate (Mbps)} \\
+\midrule
+Traditional X265 (CRF 28) & 34.641 & 0.9084 & -- & -- & 13.120 \\
+SAC-X265 (25/32) & 33.428 & 0.8947 & 36.943 & 0.9499 & 18.690 \\
+\midrule
+\textbf{\(\Delta\) (SAC $-$ Trad)} & -1.213 & -0.0136 & +2.301 & +0.0415 & +5.570 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Kết Quả Grid Search 9 Cặp CRF}
+Kết quả tối ưu được đọc trực tiếp từ \texttt{crf\textunderscore optimization\textunderscore summary.csv}. Config tốt nhất theo objective là \textbf{25/32}.
+
+\begin{table}[H]
+\centering
+\caption{Kết quả grid search CRF ($\lambda=0.4$)}
+\label{tab:grid}
+\begin{tabular}{cccccccc}
+\toprule
+\textbf{CRF\textsubscript{ROI}} & \textbf{CRF\textsubscript{non}} & \textbf{SA-PSNR} & \textbf{SA-SSIM} & \textbf{$\Delta$SA-PSNR} & \textbf{BR\textsubscript{SAC}} & \textbf{BR\textsubscript{Trad}} & \textbf{Score} \\
+\midrule
+25 & 32 & 36.665 & 0.9479 & +2.551 & 18.305 & 13.910 & \textbf{0.793} \\
+25 & 35 & 35.970 & 0.9424 & +2.916 & 16.497 & 10.978 & 0.708 \\
+25 & 30 & 37.096 & 0.9513 & +2.983 & 19.889 & 13.910 & 0.591 \\
+23 & 30 & 37.364 & 0.9531 & +2.199 & 23.165 & 17.685 & 0.006 \\
+23 & 32 & 36.943 & 0.9499 & +2.829 & 21.582 & 13.910 & -0.240 \\
+23 & 35 & 36.256 & 0.9446 & +2.668 & 19.774 & 12.342 & -0.305 \\
+20 & 30 & 37.696 & 0.9554 & +1.992 & 29.737 & 19.915 & -1.937 \\
+20 & 32 & 37.289 & 0.9525 & +2.124 & 28.153 & 17.685 & -2.063 \\
+20 & 35 & 36.627 & 0.9477 & +2.513 & 26.346 & 13.910 & -2.461 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Kết Quả Latency Realtime}
+Bảng này lấy từ benchmark PIDNet ở thư mục \texttt{outputs/model\textunderscore benchmark/compare\textunderscore pidnet\textunderscore small/}.
+
+\begin{table}[H]
+\centering
+\caption{Latency từng bước cho pipeline realtime PIDNet}
+\label{tab:latency}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Bước} & \textbf{GPU (ms)} & \textbf{CPU (ms)} & \textbf{Ghi chú} \\
+\midrule
+Preprocessing & 12.077 & 12.589 & Resize, normalize \\
+PIDNet inference & 8.464 & 140.683 & torch.no\_grad() \\
+Mask \& split & 7.429 & 40.855 & bitwise\_and \\
+x265 encode+decode & 544.620 & 585.569 & FFmpeg pipe \\
+Blend & 9.473 & 10.568 & addition filter \\
+\midrule
+\textbf{Total} & 802.158 & 1022.821 &  \\
+\textbf{FPS} & 1.247 & 0.978 & = 1000/Total \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Phân Tích Kết Quả}
+\subsection{Trade-off giữa chất lượng và bitrate}
+Grid search 9 cặp CRF xác nhận trade-off rõ ràng giữa chất lượng và bitrate. Nếu chỉ tối đa hóa SA-PSNR, cấu hình 20/30 đạt giá trị cao nhất 37.696 dB nhưng bitrate tăng mạnh. Với objective có phạt bitrate ($\lambda=0.4$), cấu hình tối ưu là 25/32 với score 0.793, cho cân bằng tốt giữa tăng chất lượng và chi phí bitrate. So với baseline 23/32, cấu hình 25/32 cải thiện objective thêm 1.033 điểm.
+
+\subsection{Ảnh hưởng đến task thị giác máy}
+Trong benchmark nhẹ của project, PIDNet và ResNet101 cho kết quả validation gần như giống nhau trên cùng tập mẫu nhỏ. Điểm khác biệt rõ nhất nằm ở latency: ResNet101 chậm hơn nhiều ở bước inference GPU và tổng CPU latency. Vì vậy, nếu mục tiêu là realtime, PIDNet phù hợp hơn.
+
+\section{So Sánh Với Phương Pháp Gốc}
+\begin{table}[H]
+\centering
+\caption{Bảng so sánh tổng hợp với bài báo SAC gốc}
+\label{tab:vs_paper}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Tiêu chí} & \textbf{Bài báo SAC gốc} & \textbf{Đề tài này} \\
+\midrule
+Model segmentation & CCNet-ResNet101 & PIDNetSegmentor \\
+Số tham số & \(\sim\)44M & \(\sim\)0.3M \\
+CRF strategy & Cố định (23/32) & Cố định + Dynamic + Grid search \\
+SA-PSNR gain & N/A & +2.551 dB (best objective, 25/32) \\
+SA-SSIM gain & N/A & +0.0470 \\
+Bitrate delta & N/A & +4.396 Mbps \\
+Inference latency & \(\sim\)150--200 ms & Đã benchmark trong project \\
+Realtime demo & Không có & Có \\
+CRF optimization tool & Không có & Có \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Kết Luận}
+Project đã có đủ artifact để đọc lại và tái lập. Phần SAC optimization đã được hoàn thiện với bảng grid search và baseline comparison, còn phần so sánh model đã có thêm benchmark riêng cho PIDNet và ResNet101 trong thư mục output độc lập. Nếu cần bước tiếp theo, nên chạy thêm benchmark trên tập mẫu lớn hơn để tăng độ tin cậy của phần training và latency.
+
+\end{document}

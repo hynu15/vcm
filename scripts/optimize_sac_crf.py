@@ -15,12 +15,12 @@ from skimage.metrics import structural_similarity as compare_ssim
 from torchvision import transforms
 from tqdm import tqdm
 
-from train_segmentation import CCNet
+from train_segmentation import load_segmentation_model
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data" / "gt_4class" / "leftImg8bit_trainvaltest" / "leftImg8bit" / "val"
-MODEL_PATH = PROJECT_ROOT / "models" / "best_ccnet.pth"
+MODEL_PATH = PROJECT_ROOT / "models" / "best_pidnet.pth"
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "optimization"
 
 
@@ -49,22 +49,15 @@ def list_input_frames(image_dir, max_frames):
 
 
 def load_model(device):
-    if not MODEL_PATH.is_file():
-        raise FileNotFoundError(f"Model not found: {MODEL_PATH}")
-    try:
-        checkpoint = torch.load(MODEL_PATH, map_location=device, weights_only=True)
-    except TypeError:
-        checkpoint = torch.load(MODEL_PATH, map_location=device)
+    model_path = MODEL_PATH
+    if not model_path.is_file():
+        legacy = PROJECT_ROOT / "models" / "best_ccnet.pth"
+        if not legacy.is_file():
+            raise FileNotFoundError(f"Model not found: {model_path} or {legacy}")
+        model_path = legacy
 
-    if isinstance(checkpoint, dict):
-        model = CCNet(num_classes=4, backbone_weights=None)
-        state_dict = checkpoint.get("model_state_dict", checkpoint)
-        model.load_state_dict(state_dict)
-    else:
-        model = checkpoint
-
-    model = model.to(device)
-    model.eval()
+    model, model_name = load_segmentation_model(str(model_path), device=device, num_classes=4)
+    print(f"Using segmentation model: {model_name} | {model_path}")
     return model
 
 
