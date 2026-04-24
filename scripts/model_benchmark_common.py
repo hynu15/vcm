@@ -25,6 +25,8 @@ from train_segmentation import Cityscapes4Class, build_segmentation_model
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TRAIN_IMAGE_DIR = PROJECT_ROOT / "data" / "gt_4class" / "leftImg8bit_trainvaltest" / "leftImg8bit" / "train"
+TRAIN_LABEL_DIR = PROJECT_ROOT / "data" / "gt_4class" / "train"
 VAL_IMAGE_DIR = PROJECT_ROOT / "data" / "gt_4class" / "leftImg8bit_trainvaltest" / "leftImg8bit" / "val"
 VAL_LABEL_DIR = PROJECT_ROOT / "data" / "gt_4class" / "val"
 
@@ -53,17 +55,19 @@ def set_seed(seed: int) -> None:
 
 
 def bce_dice_loss(pred: torch.Tensor, target: torch.Tensor, num_classes: int = 4) -> torch.Tensor:
-	bce = nn.CrossEntropyLoss()(pred, target)
-	pred_soft = F.softmax(pred, dim=1)
-	target_onehot = F.one_hot(target, num_classes=num_classes).permute(0, 3, 1, 2).float()
-	dice = 1 - (
-		(2 * (pred_soft * target_onehot).sum(dim=(2, 3)) + 1)
-		/ (pred_soft.sum(dim=(2, 3)) + target_onehot.sum(dim=(2, 3)) + 1)
-	)
-	return bce + dice.mean()
+	with torch.amp.autocast("cuda", enabled=False):
+		pred_fp32 = pred.float()
+		target_onehot = F.one_hot(target, num_classes=num_classes).permute(0, 3, 1, 2).float()
+		bce = nn.CrossEntropyLoss()(pred_fp32, target)
+		pred_soft = F.softmax(pred_fp32, dim=1)
+		dice = 1 - (
+			(2 * (pred_soft * target_onehot).sum(dim=(2, 3)) + 1)
+			/ (pred_soft.sum(dim=(2, 3)) + target_onehot.sum(dim=(2, 3)) + 1)
+		)
+		return bce + dice.mean()
 
 
-def _build_dataset(image_size: Tuple[int, int]) -> Cityscapes4Class:
+def _build_dataset(image_size: Tuple[int, int], image_dir: Path, label_dir: Path) -> Cityscapes4Class:
 	transform = transforms.Compose(
 		[
 			transforms.ToTensor(),
@@ -71,27 +75,20 @@ def _build_dataset(image_size: Tuple[int, int]) -> Cityscapes4Class:
 		]
 	)
 	return Cityscapes4Class(
-		str(VAL_IMAGE_DIR),
-		str(VAL_LABEL_DIR),
+		str(image_dir),
+		str(label_dir),
 		transform=transform,
 		image_size=image_size,
 	)
 
 
-def _split_dataset(dataset: Cityscapes4Class, train_ratio: float, max_samples: int, seed: int):
-	total = len(dataset)
-	indices = list(range(total))
+def _subset_dataset(dataset: Cityscapes4Class, max_samples: int, seed: int):
+	if max_samples <= 0 or max_samples >= len(dataset):
+		return dataset
+	indices = list(range(len(dataset)))
 	rng = random.Random(seed)
 	rng.shuffle(indices)
-	if max_samples > 0:
-		indices = indices[: min(max_samples, len(indices))]
-	train_size = max(1, int(len(indices) * train_ratio))
-	train_idx = indices[:train_size]
-	val_idx = indices[train_size:]
-	if not val_idx:
-		val_idx = train_idx[-1:]
-		train_idx = train_idx[:-1]
-	return Subset(dataset, train_idx), Subset(dataset, val_idx)
+	return Subset(dataset, indices[:max_samples])
 
 
 def train_and_log(
@@ -109,8 +106,16 @@ def train_and_log(
 	seed: int,
 ) -> Tuple[Path, Path, Path]:
 	set_seed(seed)
-	dataset = _build_dataset(image_size)
-	train_ds, val_ds = _split_dataset(dataset, train_ratio, max_samples, seed)
+	_ = train_ratio  # Train/val split is fixed by Cityscapes folders.
+	train_dataset = _build_dataset(image_size, TRAIN_IMAGE_DIR, TRAIN_LABEL_DIR)
+	val_dataset = _build_dataset(image_size, VAL_IMAGE_DIR, VAL_LABEL_DIR)
+	train_ds = _subset_dataset(train_dataset, max_samples, seed)
+	val_ds = val_dataset
+
+	if len(train_ds) == 0:
+		raise RuntimeError(f"Empty train dataset at {TRAIN_IMAGE_DIR} / {TRAIN_LABEL_DIR}")
+	if len(val_ds) == 0:
+		raise RuntimeError(f"Empty val dataset at {VAL_IMAGE_DIR} / {VAL_LABEL_DIR}")
 
 	train_loader = DataLoader(
 		train_ds,

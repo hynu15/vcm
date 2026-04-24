@@ -21,15 +21,19 @@ class CrissCrossAttention(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
+        original_dtype = x.dtype
         B, C, H, W = x.size()
-        proj_query = self.query_conv(x).view(B, -1, H * W).permute(0, 2, 1)  # B, N, C'
-        proj_key = self.key_conv(x).view(B, -1, H * W)                     # B, C', N
-        energy = torch.bmm(proj_query, proj_key)                           # B, N, N
-        attention = F.softmax(energy, dim=-1)
-        proj_value = self.value_conv(x).view(B, -1, H * W)                 # B, C, N
-        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
-        out = out.view(B, C, H, W)
-        return self.gamma * out + x
+        with torch.amp.autocast('cuda', enabled=False):
+            x_fp32 = x.float()
+            proj_query = self.query_conv(x_fp32).view(B, -1, H * W).permute(0, 2, 1)  # B, N, C'
+            proj_key = self.key_conv(x_fp32).view(B, -1, H * W)                        # B, C', N
+            energy = torch.bmm(proj_query, proj_key)                                    # B, N, N
+            attention = F.softmax(energy, dim=-1)
+            proj_value = self.value_conv(x_fp32).view(B, -1, H * W)                    # B, C, N
+            out = torch.bmm(proj_value, attention.permute(0, 2, 1))
+            out = out.view(B, C, H, W)
+            out = self.gamma.float() * out + x_fp32
+        return out.to(original_dtype)
 
 
 class LegacyCCNetResNet101(nn.Module):
@@ -191,7 +195,7 @@ def load_segmentation_model(model_path, device, num_classes=4, default_model='pi
         if isinstance(state_dict, dict):
             model_name = infer_model_name_from_state_dict(state_dict)
 
-    model = build_segmentation_model(model_name=model_name, num_classes=num_classes, backbone_weights=None)
+    model = build_segmentation_model(model_name=model_name, num_classes=4, backbone_weights='IMAGENET1K_V1').to(device)
     model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
@@ -258,7 +262,7 @@ if __name__ == "__main__":
     MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
     os.makedirs(MODEL_DIR, exist_ok=True)
     IMAGE_SIZE = (512, 1024)
-    NUM_EPOCHS = 100
+    NUM_EPOCHS = 50
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -282,18 +286,23 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, num_workers=4, pin_memory=True)
 
-    model_name = 'pidnet_s'
+    model_name = 'ccnet'  #pidnet_s
     model = build_segmentation_model(model_name=model_name, num_classes=4, backbone_weights=None).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-5)
     scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
 
     # Loss theo paper (BCE + Dice)
     def bce_dice_loss(pred, target):
-        bce = nn.CrossEntropyLoss()(pred, target)
-        pred_soft = F.softmax(pred, dim=1)
-        target_onehot = F.one_hot(target, num_classes=4).permute(0,3,1,2).float()
-        dice = 1 - (2 * (pred_soft * target_onehot).sum(dim=(2,3)) + 1) / (pred_soft.sum(dim=(2,3)) + target_onehot.sum(dim=(2,3)) + 1)
-        return bce + dice.mean()
+        with torch.amp.autocast('cuda', enabled=False):
+            pred_fp32 = pred.float()
+            target_onehot = F.one_hot(target, num_classes=4).permute(0, 3, 1, 2).float()
+            bce = nn.CrossEntropyLoss()(pred_fp32, target)
+            pred_soft = F.softmax(pred_fp32, dim=1)
+            dice = 1 - (
+                (2 * (pred_soft * target_onehot).sum(dim=(2, 3)) + 1)
+                / (pred_soft.sum(dim=(2, 3)) + target_onehot.sum(dim=(2, 3)) + 1)
+            )
+            return bce + dice.mean()
 
     best_miou = 0
     for epoch in range(NUM_EPOCHS):
@@ -306,6 +315,10 @@ if __name__ == "__main__":
             with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
                 outputs = model(images)
                 loss = bce_dice_loss(outputs, labels)
+
+            if not torch.isfinite(loss):
+                optimizer.zero_grad(set_to_none=True)
+                continue
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -341,8 +354,8 @@ if __name__ == "__main__":
                         'num_classes': 4,
                     },
                 },
-                os.path.join(MODEL_DIR, 'best_pidnet.pth'),
+                os.path.join(MODEL_DIR, 'best_ccnet.pth'),
             )
             print(f"✅ Lưu model tốt nhất: mIOU = {best_miou:.4f}")
 
-    print(f"✅ Hoàn thành training! Model lưu tại: {os.path.join(MODEL_DIR, 'best_pidnet.pth')}")
+    print(f"✅ Hoàn thành training! Model lưu tại: {os.path.join(MODEL_DIR, 'best_ccnet.pth')}")

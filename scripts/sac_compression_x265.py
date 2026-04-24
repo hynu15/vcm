@@ -46,7 +46,7 @@ TMP_DIR = os.path.join(OUTPUT_DIR, 'tmp_frames')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# Lấy 20 frame đầu tiên của val để test nhanh (bạn có thể tăng lên)
+# Dùng toàn bộ split val để đánh giá compression; có thể giới hạn lại khi cần test nhanh.
 IMAGE_DIR = os.path.join(PROJECT_ROOT, 'data', 'gt_4class', 'leftImg8bit_trainvaltest', 'leftImg8bit', 'val')
 files = []
 for city in sorted(os.listdir(IMAGE_DIR)):
@@ -56,7 +56,10 @@ for city in sorted(os.listdir(IMAGE_DIR)):
     for f in sorted(os.listdir(city_dir)):
         if f.endswith('_leftImg8bit.png'):
             files.append(os.path.join(city_dir, f))
-files = files[:20]
+
+MAX_FRAMES = None  # đặt số nguyên nếu muốn giới hạn, ví dụ 20 để chạy thử nhanh
+if MAX_FRAMES is not None:
+    files = files[:MAX_FRAMES]
 
 print(f"Đang xử lý {len(files)} frames với SAC-X265...")
 
