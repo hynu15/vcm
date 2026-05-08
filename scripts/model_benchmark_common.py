@@ -281,7 +281,7 @@ def run_sac_metrics(
 			pred = model(inp)
 		mask = torch.argmax(pred, dim=1)[0].detach().cpu().numpy().astype(np.uint8)
 		mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-		roi = (mask == 0).astype(np.uint8) * 255
+		roi = macroblock_align_filter((mask == 0).astype(np.uint8), block_size=16) * 255
 		roi_masks.append((roi > 0).astype(np.uint8))
 
 		roi_img = cv2.bitwise_and(orig_np, orig_np, mask=roi)
@@ -299,14 +299,14 @@ def run_sac_metrics(
 	run_ffmpeg(
 		[
 			"ffmpeg", "-y", "-framerate", str(fps), "-i", str(tmp_dir / "frame_%04d_roi.png"),
-			"-c:v", "libx265", "-crf", str(crf_roi), "-preset", preset, str(roi_video),
+			"-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(crf_roi), "-preset", preset, str(roi_video),
 		],
 		"encode roi",
 	)
 	run_ffmpeg(
 		[
 			"ffmpeg", "-y", "-framerate", str(fps), "-i", str(tmp_dir / "frame_%04d_non.png"),
-			"-c:v", "libx265", "-crf", str(crf_non), "-preset", preset, str(non_video),
+			"-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(crf_non), "-preset", preset, str(non_video),
 		],
 		"encode non",
 	)
@@ -320,7 +320,7 @@ def run_sac_metrics(
 	run_ffmpeg(
 		[
 			"ffmpeg", "-y", "-framerate", str(fps), "-i", str(tmp_dir / "frame_%04d_orig.png"),
-			"-c:v", "libx265", "-crf", str(crf_trad), "-preset", preset, str(trad_video),
+			"-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(crf_trad), "-preset", preset, str(trad_video),
 		],
 		"encode trad",
 	)
@@ -470,7 +470,7 @@ def run_latency_benchmark(
 			t2 = time.perf_counter()
 			mask = torch.argmax(pred, dim=1)[0].detach().cpu().numpy().astype(np.uint8)
 			mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-			roi = (mask == 0).astype(np.uint8) * 255
+			roi = macroblock_align_filter((mask == 0).astype(np.uint8), block_size=16) * 255
 			roi_img = cv2.bitwise_and(orig_np, orig_np, mask=roi)
 			non_img = cv2.bitwise_and(orig_np, orig_np, mask=255 - roi)
 			accum["mask_split"][device_name] += (time.perf_counter() - t2) * 1000.0
@@ -486,21 +486,21 @@ def run_latency_benchmark(
 			run_ffmpeg(
 				[
 					"ffmpeg", "-y", "-framerate", str(fps), "-i", str(tmp_dir / f"{device_name}_{idx:04d}_roi.png"),
-					"-c:v", "libx265", "-crf", str(crf_roi), "-preset", preset, str(roi_video),
+					"-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(crf_roi), "-preset", preset, str(roi_video),
 				],
 				f"latency roi {device_name} frame {idx}",
 			)
 			run_ffmpeg(
 				[
 					"ffmpeg", "-y", "-framerate", str(fps), "-i", str(tmp_dir / f"{device_name}_{idx:04d}_non.png"),
-					"-c:v", "libx265", "-crf", str(crf_non), "-preset", preset, str(non_video),
+					"-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(crf_non), "-preset", preset, str(non_video),
 				],
 				f"latency non {device_name} frame {idx}",
 			)
 			run_ffmpeg(
 				[
 					"ffmpeg", "-y", "-framerate", str(fps), "-i", str(tmp_dir / f"{device_name}_{idx:04d}_orig.png"),
-					"-c:v", "libx265", "-crf", str(crf_trad), "-preset", preset, str(trad_video),
+					"-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(crf_trad), "-preset", preset, str(trad_video),
 				],
 				f"latency trad {device_name} frame {idx}",
 			)
@@ -610,4 +610,20 @@ def run_full_benchmark(args: argparse.Namespace) -> BenchmarkResult:
 		latency_csv=latency_csv,
 		checkpoint_path=checkpoint_path,
 	)
+
+def macroblock_align_filter(mask_2d, block_size=16):
+    h, w = mask_2d.shape
+    pad_h = (h + block_size - 1) // block_size * block_size
+    pad_w = (w + block_size - 1) // block_size * block_size
+    
+    padded = np.zeros((pad_h, pad_w), dtype=np.uint8)
+    padded[:h, :w] = mask_2d
+    
+    blocks = padded.reshape(pad_h // block_size, block_size, 
+                            pad_w // block_size, block_size)
+    roi_max = blocks.max(axis=(1, 3))
+    aligned = np.repeat(np.repeat(roi_max, block_size, axis=0), block_size, axis=1)
+    
+    return aligned[:h, :w]
+
 

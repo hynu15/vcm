@@ -7,16 +7,28 @@ import cv2
 import subprocess
 from train_segmentation import load_segmentation_model
 
+def macroblock_align_filter(mask_2d, block_size=16):
+    h, w = mask_2d.shape
+    pad_h = (h + block_size - 1) // block_size * block_size
+    pad_w = (w + block_size - 1) // block_size * block_size
+    
+    padded = np.zeros((pad_h, pad_w), dtype=np.uint8)
+    padded[:h, :w] = mask_2d
+    
+    blocks = padded.reshape(pad_h // block_size, block_size, 
+                            pad_w // block_size, block_size)
+    roi_max = blocks.max(axis=(1, 3))
+    aligned = np.repeat(np.repeat(roi_max, block_size, axis=0), block_size, axis=1)
+    
+    return aligned[:h, :w]
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 # ====================== Load model ======================
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model_path = os.path.join(PROJECT_ROOT, 'models', 'best_best_ccnet.pth')
+model_path = os.path.join(PROJECT_ROOT, 'models', 'best_ccnet.pth')
 if not os.path.isfile(model_path):
-    legacy_path = os.path.join(PROJECT_ROOT, 'models', 'best_ccnet.pth')
-    if not os.path.isfile(legacy_path):
-        raise FileNotFoundError(f"Không tìm thấy model: {model_path} hoặc {legacy_path}")
-    model_path = legacy_path
+    raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
 
 model, model_name = load_segmentation_model(model_path, device=device, num_classes=4)
 print(f"Dùng segmentation model: {model_name} | {model_path}")
@@ -79,7 +91,7 @@ for idx, img_path in enumerate(files):
     mask = torch.argmax(pred, dim=1)[0].cpu().numpy()  # 0=ROI, 1=sky, 2=construction, 3=nature
     # Bring prediction mask back to original image size for OpenCV bitwise ops.
     mask = cv2.resize(mask.astype(np.uint8), (orig_np.shape[1], orig_np.shape[0]), interpolation=cv2.INTER_NEAREST)
-    roi_mask = (mask == 0).astype(np.uint8) * 255
+    roi_mask = macroblock_align_filter((mask == 0).astype(np.uint8), block_size=16) * 255
 
     # 2. Tạo 2 stream (ROI & non-ROI)
     roi_img = cv2.bitwise_and(orig_np, orig_np, mask=roi_mask)

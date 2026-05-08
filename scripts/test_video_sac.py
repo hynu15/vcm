@@ -19,6 +19,21 @@ from PIL import Image
 from torchvision import transforms
 from train_segmentation import load_segmentation_model
 
+def macroblock_align_filter(mask_2d, block_size=16):
+    h, w = mask_2d.shape
+    pad_h = (h + block_size - 1) // block_size * block_size
+    pad_w = (w + block_size - 1) // block_size * block_size
+    
+    padded = np.zeros((pad_h, pad_w), dtype=np.uint8)
+    padded[:h, :w] = mask_2d
+    
+    blocks = padded.reshape(pad_h // block_size, block_size, 
+                            pad_w // block_size, block_size)
+    roi_max = blocks.max(axis=(1, 3))
+    aligned = np.repeat(np.repeat(roi_max, block_size, axis=0), block_size, axis=1)
+    
+    return aligned[:h, :w]
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 # thêm chọn classs roi linh hoạt, ép sky ra non-roi bằng hearistic cho video thực tế (đôi khi model nhầm sky thành ROI)
 
@@ -48,6 +63,7 @@ def build_roi_mask(mask, orig_rgb, roi_classes, force_sky_nonroi=False):
         sky_like = sky_like | (mask == 1)
         roi_mask[sky_like] = 0
 
+    roi_mask = macroblock_align_filter(roi_mask, 16)
     return (roi_mask * 255).astype(np.uint8)
 
 
@@ -263,7 +279,7 @@ def main():
         [
             "ffmpeg", "-y", "-framerate", "30",
             "-i", os.path.join(tmp_frame_dir, "frame_%04d_roi.png"),
-            "-c:v", "libx265", "-crf", str(args.crf_roi), "-preset", "medium",
+            "-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(args.crf_roi), "-preset", "medium",
             os.path.join(output_dir, "roi.mp4"),
         ],
         "Encode ROI stream"
@@ -273,7 +289,7 @@ def main():
         [
             "ffmpeg", "-y", "-framerate", "30",
             "-i", os.path.join(tmp_frame_dir, "frame_%04d_non.png"),
-            "-c:v", "libx265", "-crf", str(args.crf_non), "-preset", "medium",
+            "-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(args.crf_non), "-preset", "medium",
             os.path.join(output_dir, "nonroi.mp4"),
         ],
         "Encode non-ROI stream"
@@ -297,7 +313,7 @@ def main():
         [
             "ffmpeg", "-y", "-framerate", "30",
             "-i", os.path.join(tmp_frame_dir, "frame_%04d_orig.png"),
-            "-c:v", "libx265", "-crf", str(total_crf), "-preset", "medium",
+            "-c:v", "libx265", "-x265-params", "aq-mode=0", "-crf", str(total_crf), "-preset", "medium",
             os.path.join(output_dir, "traditional_x265.mp4"),
         ],
         "Encode traditional X265"

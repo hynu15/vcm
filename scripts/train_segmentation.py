@@ -1,10 +1,15 @@
+import io
 import os
+import csv
+import json
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models, transforms
 from PIL import Image
+from PIL import ImageFilter
 import numpy as np
 from tqdm import tqdm
 
@@ -247,6 +252,44 @@ class Cityscapes4Class(Dataset):
         label = torch.from_numpy(np.array(label)).long()
         return image, label
 
+
+class CompressionArtifactAugmentation:
+    """Approximate decoded-video artifacts with a light JPEG re-encode and resize jitter."""
+
+    def __init__(self, p: float = 0.7, min_quality: int = 35, max_quality: int = 90):
+        self.p = p
+        self.min_quality = min_quality
+        self.max_quality = max_quality
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        if random.random() > self.p:
+            return image
+
+        width, height = image.size
+        work = image
+
+        if random.random() < 0.9:
+            scale = random.uniform(0.6, 1.0)
+            down_width = max(64, int(width * scale))
+            down_height = max(64, int(height * scale))
+            work = work.resize((down_width, down_height), Image.BICUBIC)
+            work = work.resize((width, height), Image.BICUBIC)
+
+        buffer = io.BytesIO()
+        jpeg_quality = random.randint(self.min_quality, self.max_quality)
+        work.save(buffer, format="JPEG", quality=jpeg_quality, subsampling=2, optimize=False)
+        buffer.seek(0)
+        work = Image.open(buffer).convert("RGB")
+
+        if random.random() < 0.5:
+            work = work.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.0, 0.8)))
+
+        if random.random() < 0.3:
+            contrast = random.uniform(0.95, 1.05)
+            work = Image.fromarray(np.clip(np.array(work, dtype=np.float32) * contrast, 0, 255).astype(np.uint8))
+
+        return work
+
 # ====================== Main ======================
 if __name__ == "__main__":
     torch.manual_seed(42)
@@ -260,17 +303,24 @@ if __name__ == "__main__":
     IMAGE_VAL_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "leftImg8bit_trainvaltest", "leftImg8bit", "val")
     LABEL_VAL_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "val")
     MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
+    METRICS_DIR = os.path.join(PROJECT_ROOT, "outputs", "metrics")
     os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(METRICS_DIR, exist_ok=True)
     IMAGE_SIZE = (512, 1024)
     NUM_EPOCHS = 50
 
-    transform = transforms.Compose([
+    train_transform = transforms.Compose([
+        CompressionArtifactAugmentation(p=0.7, min_quality=35, max_quality=90),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    val_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    train_ds = Cityscapes4Class(IMAGE_TRAIN_DIR, LABEL_TRAIN_DIR, transform, image_size=IMAGE_SIZE)
-    val_ds = Cityscapes4Class(IMAGE_VAL_DIR, LABEL_VAL_DIR, transform, image_size=IMAGE_SIZE)
+    train_ds = Cityscapes4Class(IMAGE_TRAIN_DIR, LABEL_TRAIN_DIR, train_transform, image_size=IMAGE_SIZE)
+    val_ds = Cityscapes4Class(IMAGE_VAL_DIR, LABEL_VAL_DIR, val_transform, image_size=IMAGE_SIZE)
 
     if len(train_ds) == 0:
         raise RuntimeError(
@@ -291,6 +341,19 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-5)
     scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
 
+    metrics_csv_path = os.path.join(METRICS_DIR, f"train_metrics_{model_name}.csv")
+    best_result_path = os.path.join(METRICS_DIR, f"best_result_{model_name}.json")
+
+    with open(metrics_csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            'epoch',
+            'mean_iou',
+            'best_miou_so_far',
+            'is_best',
+            'model_name',
+        ])
+
     # Loss theo paper (BCE + Dice)
     def bce_dice_loss(pred, target):
         with torch.amp.autocast('cuda', enabled=False):
@@ -305,6 +368,7 @@ if __name__ == "__main__":
             return bce + dice.mean()
 
     best_miou = 0
+    best_epoch = -1
     for epoch in range(NUM_EPOCHS):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS}")
@@ -344,18 +408,52 @@ if __name__ == "__main__":
         mean_iou = np.mean(ious)
         print(f"Epoch {epoch+1} - mIOU: {mean_iou:.4f}")
 
-        if mean_iou > best_miou:
+        is_best = mean_iou > best_miou
+
+        with open(metrics_csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                epoch + 1,
+                float(mean_iou),
+                float(max(best_miou, mean_iou)),
+                int(is_best),
+                model_name,
+            ])
+
+        if is_best:
             best_miou = mean_iou
+            best_epoch = epoch + 1
+            model_save_path = os.path.join(MODEL_DIR, 'best_ccnet.pth')
             torch.save(
                 {
                     'model_state_dict': model.state_dict(),
                     'meta': {
                         'model_name': model_name,
                         'num_classes': 4,
+                        'best_miou': float(best_miou),
+                        'best_epoch': int(best_epoch),
                     },
                 },
-                os.path.join(MODEL_DIR, 'best_ccnet.pth'),
+                model_save_path,
             )
+
+            with open(best_result_path, 'w', encoding='utf-8') as f:
+                json.dump(
+                    {
+                        'model_name': model_name,
+                        'best_miou': float(best_miou),
+                        'best_epoch': int(best_epoch),
+                        'num_epochs': int(NUM_EPOCHS),
+                        'checkpoint_path': model_save_path,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
             print(f"✅ Lưu model tốt nhất: mIOU = {best_miou:.4f}")
 
     print(f"✅ Hoàn thành training! Model lưu tại: {os.path.join(MODEL_DIR, 'best_ccnet.pth')}")
+    print(f"📊 Log mIOU từng epoch: {metrics_csv_path}")
+    if best_epoch > 0:
+        print(f"🏆 Best result: epoch={best_epoch}, mIOU={best_miou:.4f}, file={best_result_path}")

@@ -17,6 +17,21 @@ from tqdm import tqdm
 
 from train_segmentation import load_segmentation_model
 
+def macroblock_align_filter(mask_2d, block_size=16):
+    h, w = mask_2d.shape
+    pad_h = (h + block_size - 1) // block_size * block_size
+    pad_w = (w + block_size - 1) // block_size * block_size
+    
+    padded = np.zeros((pad_h, pad_w), dtype=np.uint8)
+    padded[:h, :w] = mask_2d
+    
+    blocks = padded.reshape(pad_h // block_size, block_size, 
+                            pad_w // block_size, block_size)
+    roi_max = blocks.max(axis=(1, 3))
+    aligned = np.repeat(np.repeat(roi_max, block_size, axis=0), block_size, axis=1)
+    
+    return aligned[:h, :w]
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data" / "gt_4class" / "leftImg8bit_trainvaltest" / "leftImg8bit" / "val"
@@ -84,7 +99,7 @@ def prepare_common_frames(files, model, device, tmp_frame_dir):
         mask = torch.argmax(pred, dim=1)[0].cpu().numpy().astype(np.uint8)
         mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
-        roi_mask = (mask == 0).astype(np.uint8) * 255
+        roi_mask = macroblock_align_filter((mask == 0).astype(np.uint8), block_size=16) * 255
         non_mask = 255 - roi_mask
 
         roi_img = cv2.bitwise_and(orig_np, orig_np, mask=roi_mask)
@@ -188,6 +203,8 @@ def encode_combo(tmp_frame_dir, combo_dir, crf_roi, crf_non, fps, preset):
             str(tmp_frame_dir / "frame_%04d_roi.png"),
             "-c:v",
             "libx265",
+            "-x265-params",
+            "aq-mode=0",
             "-crf",
             str(crf_roi),
             "-preset",
@@ -207,6 +224,8 @@ def encode_combo(tmp_frame_dir, combo_dir, crf_roi, crf_non, fps, preset):
             str(tmp_frame_dir / "frame_%04d_non.png"),
             "-c:v",
             "libx265",
+            "-x265-params",
+            "aq-mode=0",
             "-crf",
             str(crf_non),
             "-preset",
@@ -241,6 +260,8 @@ def encode_combo(tmp_frame_dir, combo_dir, crf_roi, crf_non, fps, preset):
             str(tmp_frame_dir / "frame_%04d_orig.png"),
             "-c:v",
             "libx265",
+            "-x265-params",
+            "aq-mode=0",
             "-crf",
             str(total_crf),
             "-preset",
