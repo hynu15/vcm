@@ -1,11 +1,14 @@
 import os
+import sys
 import torch
 from torchvision import transforms
 from PIL import Image
 import numpy as np
 import cv2
 import subprocess
-from train_segmentation import load_segmentation_model
+
+sys.path.insert(0, os.path.dirname(__file__))
+from new_feature.ccnet_4class import load_ccnet_4class
 
 def macroblock_align_filter(mask_2d, block_size=16):
     h, w = mask_2d.shape
@@ -26,11 +29,12 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 # ====================== Load model ======================
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model_path = os.path.join(PROJECT_ROOT, 'models', 'best_ccnet.pth')
+model_path = os.path.join(PROJECT_ROOT, 'models', 'best_ccnet_4class.pth')
 if not os.path.isfile(model_path):
     raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
 
-model, model_name = load_segmentation_model(model_path, device=device, num_classes=4)
+model = load_ccnet_4class(model_path, device=device)
+model_name = "ccnet_4class"
 print(f"Dùng segmentation model: {model_name} | {model_path}")
 
 transform = transforms.Compose([
@@ -69,7 +73,7 @@ for city in sorted(os.listdir(IMAGE_DIR)):
         if f.endswith('_leftImg8bit.png'):
             files.append(os.path.join(city_dir, f))
 
-MAX_FRAMES = None  # đặt số nguyên nếu muốn giới hạn, ví dụ 20 để chạy thử nhanh
+MAX_FRAMES = 20  # đặt số nguyên nếu muốn giới hạn, ví dụ 20 để chạy thử nhanh
 if MAX_FRAMES is not None:
     files = files[:MAX_FRAMES]
 
@@ -88,7 +92,7 @@ for idx, img_path in enumerate(files):
     input_tensor = transform(orig).unsqueeze(0).to(device)
     with torch.no_grad():
         pred = model(input_tensor)
-    mask = torch.argmax(pred, dim=1)[0].cpu().numpy()  # 0=ROI, 1=sky, 2=construction, 3=nature
+    mask = torch.argmax(pred, dim=1)[0].cpu().numpy()  # 0=ROI, 1=non_ROI
     # Bring prediction mask back to original image size for OpenCV bitwise ops.
     mask = cv2.resize(mask.astype(np.uint8), (orig_np.shape[1], orig_np.shape[0]), interpolation=cv2.INTER_NEAREST)
     roi_mask = macroblock_align_filter((mask == 0).astype(np.uint8), block_size=16) * 255

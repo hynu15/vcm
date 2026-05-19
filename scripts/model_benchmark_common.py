@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from tqdm import tqdm
 
-from train_segmentation import Cityscapes4Class, build_segmentation_model
+from train_segmentation import CityscapesROI, build_segmentation_model
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -54,7 +54,7 @@ def set_seed(seed: int) -> None:
 	torch.cuda.manual_seed_all(seed)
 
 
-def bce_dice_loss(pred: torch.Tensor, target: torch.Tensor, num_classes: int = 4) -> torch.Tensor:
+def bce_dice_loss(pred: torch.Tensor, target: torch.Tensor, num_classes: int = 2) -> torch.Tensor:
 	with torch.amp.autocast("cuda", enabled=False):
 		pred_fp32 = pred.float()
 		target_onehot = F.one_hot(target, num_classes=num_classes).permute(0, 3, 1, 2).float()
@@ -67,14 +67,14 @@ def bce_dice_loss(pred: torch.Tensor, target: torch.Tensor, num_classes: int = 4
 		return bce + dice.mean()
 
 
-def _build_dataset(image_size: Tuple[int, int], image_dir: Path, label_dir: Path) -> Cityscapes4Class:
+def _build_dataset(image_size: Tuple[int, int], image_dir: Path, label_dir: Path) -> CityscapesROI:
 	transform = transforms.Compose(
 		[
 			transforms.ToTensor(),
 			transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 		]
 	)
-	return Cityscapes4Class(
+	return CityscapesROI(
 		str(image_dir),
 		str(label_dir),
 		transform=transform,
@@ -82,7 +82,7 @@ def _build_dataset(image_size: Tuple[int, int], image_dir: Path, label_dir: Path
 	)
 
 
-def _subset_dataset(dataset: Cityscapes4Class, max_samples: int, seed: int):
+def _subset_dataset(dataset: CityscapesROI, max_samples: int, seed: int):
 	if max_samples <= 0 or max_samples >= len(dataset):
 		return dataset
 	indices = list(range(len(dataset)))
@@ -132,7 +132,7 @@ def train_and_log(
 		pin_memory=(device.type == "cuda"),
 	)
 
-	model = build_segmentation_model(model_name=model_name, num_classes=4, backbone_weights=None).to(device)
+	model = build_segmentation_model(model_name=model_name, num_classes=2, backbone_weights=None).to(device)
 	optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 	scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
@@ -176,7 +176,7 @@ def train_and_log(
 				pred = torch.argmax(logits, dim=1)
 				for p, t in zip(pred, labels):
 					per_class_iou = []
-					for c in range(4):
+					for c in range(2):
 						inter = ((p == c) & (t == c)).sum().item()
 						union = ((p == c) | (t == c)).sum().item()
 						per_class_iou.append(inter / union if union > 0 else 0.0)
@@ -193,7 +193,7 @@ def train_and_log(
 			torch.save(
 				{
 					"model_state_dict": model.state_dict(),
-					"meta": {"model_name": model_name, "num_classes": 4},
+					"meta": {"model_name": model_name, "num_classes": 2},
 					"epoch": epoch,
 					"best_miou": best_miou,
 				},
@@ -233,7 +233,7 @@ def _list_eval_frames(num_frames: int) -> List[Path]:
 
 
 def _prepare_model_for_infer(model_name: str, checkpoint_path: Path, device: torch.device):
-	model = build_segmentation_model(model_name=model_name, num_classes=4, backbone_weights=None).to(device)
+	model = build_segmentation_model(model_name=model_name, num_classes=2, backbone_weights=None).to(device)
 	ckpt = torch.load(checkpoint_path, map_location=device)
 	state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
 	model.load_state_dict(state_dict)
@@ -294,7 +294,7 @@ def run_sac_metrics(
 	non_video = run_dir / "nonroi.mp4"
 	sac_video = run_dir / "sac_x265.mp4"
 	trad_video = run_dir / "traditional_x265.mp4"
-	crf_trad = int(round((crf_roi + crf_non) / 2.0))
+	crf_trad = (crf_roi + crf_non) // 2
 
 	run_ffmpeg(
 		[
@@ -439,7 +439,7 @@ def run_latency_benchmark(
 	tmp_dir = run_dir / "tmp_latency"
 	tmp_dir.mkdir(parents=True, exist_ok=True)
 	fps = 30
-	crf_trad = int(round((crf_roi + crf_non) / 2.0))
+	crf_trad = (crf_roi + crf_non) // 2
 
 	for device_name, model, device in [
 		("gpu", model_gpu, torch.device("cuda") if model_gpu is not None else None),

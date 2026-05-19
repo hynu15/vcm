@@ -1,0 +1,496 @@
+% ============================================================
+%  Báo cáo cải tiến: CCNet-4Class Training Pipeline
+%  Mô tả các thay đổi trong scripts/new_feature/ nhằm bám sát
+%  Wang et al. (IEEE TIV 2023) và cải thiện val mIoU từ ~0.79
+%  lên mục tiêu 85–90%.
+% ============================================================
+
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese,english]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm, top=3cm, bottom=3cm}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{setspace}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, calc}
+
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codeframe}{RGB}{200,200,200}
+\definecolor{keyword}{RGB}{0,0,180}
+\definecolor{comment}{RGB}{100,100,100}
+\definecolor{string}{RGB}{160,0,0}
+
+\lstset{
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{keyword}\bfseries,
+  commentstyle=\color{comment}\itshape,
+  stringstyle=\color{string},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  breaklines=true,
+  language=Python,
+  showstringspaces=false,
+  tabsize=4,
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{CCNet-4Class: Cải tiến Training Pipeline}
+\lhead{SAC Paper Reproduction}
+\rfoot{\thepage}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+}
+
+\onehalfspacing
+
+% ─────────────────────────────────────────────────────────────
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\LARGE \textbf{Cải Tiến Pipeline Huấn Luyện CCNet-4Class}}\\[0.5cm]
+  {\large Tái hiện Wang et al. ``Semantic-Aware Video Compression\\
+  for Automotive Cameras'', IEEE TIV 2023}\\[1.5cm]
+
+  \begin{tabular}{ll}
+    \textbf{Phạm vi thay đổi:} & \texttt{scripts/new\_feature/} \\
+    \textbf{Các file cập nhật:} & \texttt{ccnet\_4class.py}, \texttt{train.py}, \texttt{dataset.py} \\
+    \textbf{Vấn đề ban đầu:} & val mIoU $\approx 0.79$ (mục tiêu paper: $\geq 0.87$) \\
+    \textbf{Mục tiêu sau cải tiến:} & val mIoU $85\%$–$90\%$ \\
+  \end{tabular}
+
+  \vfill
+  \today
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Tổng quan vấn đề}
+% ============================================================
+
+Trong quá trình tái hiện bài báo SAC (Wang et al., IEEE TIV 2023), model CCNet-4Class
+được huấn luyện trên tập Cityscapes chỉ đạt val mIoU $\approx 0.79$, thấp hơn đáng kể
+so với mức kỳ vọng $\geq 0.87$ mà paper ghi nhận (Table IV: SA-X265 đạt mIoU 87.48\%
+trên frame đã nén). Phân tích nguyên nhân xác định ba vấn đề kỹ thuật trong code:
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{Không có LR scheduler} — Adam với learning rate cố định $3\times10^{-4}$
+        suốt 47 epoch. Mô hình plateau sớm khoảng epoch 25–30.
+  \item \textbf{Feature map quá thô (stride-32)} — Backbone ResNet101 giữ nguyên stride,
+        khiến feature map sau \texttt{layer4} chỉ còn $16\times32$ pixels (tại input
+        $512\times1024$). Sau đó upsample $\times32$ lên output — gây mất chi tiết không gian
+        nghiêm trọng.
+  \item \textbf{Augmentation yếu} — Chỉ dùng horizontal flip, thiếu scale augmentation
+        và color jitter.
+\end{enumerate}
+
+Ước tính ảnh hưởng lên mIoU:
+
+\begin{table}[H]
+  \centering
+  \caption{Phân tích nguyên nhân mIoU thấp}
+  \begin{tabular}{lcc}
+    \toprule
+    \textbf{Vấn đề} & \textbf{Ảnh hưởng ước tính} & \textbf{File} \\
+    \midrule
+    Không có LR scheduler & $-3$ đến $-5\%$ mIoU & \texttt{train.py} \\
+    Stride-32 (không dilated) & $-2$ đến $-4\%$ mIoU & \texttt{ccnet\_4class.py} \\
+    Augmentation yếu & $-1$ đến $-2\%$ mIoU & \texttt{dataset.py} \\
+    \midrule
+    \textbf{Tổng} & \boldmath$-6$ đến $-11\%$ mIoU & — \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{Thay đổi 1 — Kiến trúc Dilated Backbone (\texttt{ccnet\_4class.py})}
+% ============================================================
+
+\subsection{Vấn đề: Stride-32 features}
+
+ResNet101 tiêu chuẩn có chuỗi stride:
+
+\[
+  \text{Input} \xrightarrow{\times4} \text{layer1}
+               \xrightarrow{\times2} \text{layer2}
+               \xrightarrow{\times2} \text{layer3}
+               \xrightarrow{\times2} \text{layer4}
+  \quad\Rightarrow\quad \text{stride tổng} = 32
+\]
+
+Với input $512\times1024$, feature map sau \texttt{layer4} chỉ còn $16\times32$.
+Sau khi upsample $\times32$ về kích thước gốc, thông tin không gian bị mất rất nhiều.
+Đây là lý do chính các mô hình segmentation như DeepLab, CCNet gốc (ICCV 2019) và
+PSPNet đều sử dụng \textbf{dilated (atrous) convolution} trên \texttt{layer3} và
+\texttt{layer4}: giữ nguyên stride $\times8$, tăng receptive field bằng dilation.
+
+\subsection{Giải pháp: Dilated layer3 và layer4}
+
+Thêm helper \texttt{\_make\_dilated} để chuyển đổi mà \textbf{không thay đổi shape
+của weights} (checkpoint cũ vẫn tương thích):
+
+\begin{lstlisting}[caption={Hàm chuyển đổi sang dilated convolution}]
+@staticmethod
+def _make_dilated(layer: nn.Sequential, dilation: int) -> None:
+    for block in layer:
+        # 3x3 conv trong Bottleneck là conv2
+        block.conv2.dilation = (dilation, dilation)
+        block.conv2.padding  = (dilation, dilation)
+        block.conv2.stride   = (1, 1)
+        # Xoá stride ở projection shortcut (block đầu tiên)
+        if block.downsample is not None:
+            block.downsample[0].stride = (1, 1)
+\end{lstlisting}
+
+Áp dụng trong \texttt{\_\_init\_\_}:
+
+\begin{lstlisting}[caption={Kích hoạt dilated trong constructor}]
+self.layer3 = bb.layer3   # dilation=2 -> stays H/8 x W/8
+self.layer4 = bb.layer4   # dilation=4 -> stays H/8 x W/8
+
+self._make_dilated(self.layer3, dilation=2)
+self._make_dilated(self.layer4, dilation=4)
+\end{lstlisting}
+
+\subsection{Kết quả}
+
+\begin{table}[H]
+  \centering
+  \caption{So sánh feature map trước và sau khi dilated}
+  \begin{tabular}{lccc}
+    \toprule
+    \textbf{Version} & \textbf{Feature map sau layer4} & \textbf{Upsample} & \textbf{Spatial info} \\
+    \midrule
+    Cũ (stride-32) & $16\times32$ & $\times32$ & Rất thô \\
+    Mới (stride-8)  & $64\times128$ & $\times8$  & Tốt hơn $4\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{CrissCross Attention — Viết lại cho stride-8}
+
+Với feature map $64\times128 = 8192$ vị trí, attention đầy đủ $N\times N$ yêu cầu
+$8192^2 \approx 67M$ phần tử/batch — không khả thi trên GPU thực tế. Giải pháp:
+\textbf{row-wise + column-wise attention} tách biệt, giảm xuống
+$O(N\cdot(H+W))$ thay vì $O(N^2)$:
+
+\begin{lstlisting}[caption={Row + column attention thay thế full N×N}]
+# Row-wise: mỗi pixel attend với toàn bộ pixel cùng hàng
+Q_r = Q.permute(0,2,1,3).reshape(B*H, c8, W)
+K_r = K.permute(0,2,1,3).reshape(B*H, c8, W)
+V_r = V.permute(0,2,1,3).reshape(B*H,  C, W)
+attn_r = F.softmax(torch.bmm(Q_r.permute(0,2,1), K_r)*scale, dim=-1)
+out_r  = torch.bmm(V_r, attn_r.permute(0,2,1))
+out_r  = out_r.reshape(B,H,C,W).permute(0,2,1,3)
+
+# Column-wise: mỗi pixel attend với toàn bộ pixel cùng cột
+Q_c = Q.permute(0,3,1,2).reshape(B*W, c8, H)
+...
+out = self.gamma * (out_r + out_c) + x
+\end{lstlisting}
+
+Hai lần áp dụng CCA stacked (cc1, cc2) vẫn xấp xỉ full attention như trong paper
+gốc CCNet (ICCV 2019).
+
+\begin{table}[H]
+  \centering
+  \caption{Chi phí bộ nhớ attention tại feature map $64\times128$}
+  \begin{tabular}{lcc}
+    \toprule
+    \textbf{Loại attention} & \textbf{Phần tử (batch=4)} & \textbf{Khả thi?} \\
+    \midrule
+    Full $N\times N$ & $4 \times 8192^2 \approx 268M$ & Không \\
+    Row-wise ($H$ ma trận $W\times W$) & $4\times64\times128^2 \approx 4M$ & Có \\
+    Col-wise ($W$ ma trận $H\times H$) & $4\times128\times64^2 \approx 2M$ & Có \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{Thay đổi 2 — Poly LR Scheduler \& Separate LR (\texttt{train.py})}
+% ============================================================
+
+\subsection{Vấn đề: LR cố định}
+
+Với Adam lr $= 3\times10^{-4}$ không đổi suốt 47 epoch, mô hình thường plateau
+ở epoch 25–30 và không cải thiện thêm. Hầu hết các mô hình segmentation hiện đại
+(CCNet, DeepLab, PIDNet) dùng \textbf{poly LR decay}.
+
+\subsection{Giải pháp 1: Poly LR Decay}
+
+\[
+  \text{lr}(e) = \text{lr}_\text{base} \times \left(1 - \frac{e}{E_\text{max}}\right)^{0.9}
+\]
+
+trong đó $e$ là epoch hiện tại, $E_\text{max}$ là tổng số epoch. Power $= 0.9$ là
+giá trị tiêu chuẩn trong các paper segmentation.
+
+\begin{lstlisting}[caption={Poly LR decay}]
+def poly_lr(base_lr: float, epoch: int, max_epochs: int,
+            power: float = 0.9) -> float:
+    return base_lr * (1.0 - epoch / max_epochs) ** power
+
+# Trong training loop — cập nhật mỗi epoch:
+for pg in optim.param_groups:
+    pg["lr"] = poly_lr(pg["initial_lr"], epoch, args.epochs)
+\end{lstlisting}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}
+    \begin{scope}[xscale=5.5, yscale=3]
+      % Axes
+      \draw[->] (0,0) -- (1.08,0) node[right] {Epoch / $E_{\max}$};
+      \draw[->] (0,0) -- (0,1.15) node[above] {lr / lr$_{\text{base}}$};
+      % Poly curve
+      \draw[blue, thick, domain=0:1, samples=60]
+        plot (\x, {(1-\x)^0.9});
+      % Flat baseline
+      \draw[red, dashed, thick] (0,1) -- (1,1);
+      % Labels
+      \node[blue] at (0.6, 0.55) {Poly ($p=0.9$)};
+      \node[red]  at (0.5, 1.08) {Cũ: cố định};
+      % Ticks
+      \foreach \x in {0, 0.5, 1}
+        \draw (\x, 0.02) -- (\x, -0.02) node[below] {\x};
+      \foreach \y in {0, 0.5, 1}
+        \draw (0.01, \y) -- (-0.01, \y) node[left] {\y};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{So sánh LR schedule cũ (cố định) và mới (poly decay)}
+\end{figure}
+
+\subsection{Giải pháp 2: Separate LR — Backbone vs Head}
+
+Backbone đã được pretrain trên ImageNet, chỉ cần fine-tune nhẹ.
+Head (reduction + CCA + seg\_head) được khởi tạo ngẫu nhiên, cần LR cao hơn.
+
+\begin{lstlisting}[caption={Separate learning rate cho backbone và head}]
+backbone_params = (
+    list(model.stem.parameters())
+    + list(model.layer1.parameters())
+    + list(model.layer2.parameters())
+    + list(model.layer3.parameters())
+    + list(model.layer4.parameters())
+)
+head_params = (
+    list(model.reduction.parameters())
+    + list(model.cc1.parameters())
+    + list(model.cc2.parameters())
+    + list(model.seg_head.parameters())
+)
+
+optim = torch.optim.Adam([
+    {"params": backbone_params,
+     "lr": BASE_LR * 0.1,        # backbone: 10x thấp hơn
+     "initial_lr": BASE_LR * 0.1},
+    {"params": head_params,
+     "lr": BASE_LR,              # head: full LR
+     "initial_lr": BASE_LR},
+], betas=(0.9, 0.999), weight_decay=1e-5)
+\end{lstlisting}
+
+\begin{table}[H]
+  \centering
+  \caption{Learning rate theo epoch (base\_lr = $3\times10^{-4}$, 60 epochs)}
+  \begin{tabular}{lccc}
+    \toprule
+    \textbf{Thành phần} & \textbf{Epoch 0} & \textbf{Epoch 30} & \textbf{Epoch 59} \\
+    \midrule
+    Backbone & $3.0\times10^{-5}$ & $1.6\times10^{-5}$ & $7.5\times10^{-7}$ \\
+    Head     & $3.0\times10^{-4}$ & $1.6\times10^{-4}$ & $7.5\times10^{-6}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Tăng epochs: 47 $\rightarrow$ 60}
+
+Với poly LR decay, các epoch đầu mang LR cao (hội tụ nhanh) và các epoch cuối
+mang LR rất thấp (tinh chỉnh). 47 epoch thường không đủ để tận dụng phase tinh chỉnh này.
+60 epochs là mức khuyến nghị phổ biến trong các paper segmentation Cityscapes.
+
+\subsection{Cải thiện resume checkpoint}
+
+Code cũ: \texttt{strict=True} khi load state dict. Nếu kiến trúc thay đổi
+(dilated vs non-dilated), việc load sẽ fail hoàn toàn. Code mới dùng \texttt{strict=False}
+và báo warning về missing/unexpected keys — cho phép partial load (warm-start).
+
+% ============================================================
+\section{Thay đổi 3 — Augmentation (\texttt{dataset.py})}
+% ============================================================
+
+\subsection{Vấn đề: Chỉ dùng horizontal flip}
+
+Augmentation duy nhất là \texttt{FLIP\_LEFT\_RIGHT} với $p=0.5$. Thiếu:
+\begin{itemize}
+  \item Scale augmentation — mô hình không học được invariance với kích thước đối tượng
+  \item Color jitter — dễ overfit màu sắc cụ thể của Cityscapes
+\end{itemize}
+
+\subsection{Giải pháp: 4-step augmentation pipeline}
+
+Thứ tự áp dụng tương tự DeepLab / CCNet:
+
+\begin{lstlisting}[caption={Pipeline augmentation mới (training only)}]
+def _augment(self, image, label, H, W):
+    # 1. Random scale: [0.75, 1.5]x base_size, clip min = base_size
+    scale = random.uniform(0.75, 1.5)
+    new_h = max(int(H * scale), H)
+    new_w = max(int(W * scale), W)
+    image = image.resize((new_w, new_h), Image.BILINEAR)
+    label = label.resize((new_w, new_h), Image.NEAREST)
+
+    # 2. Random crop: cat về đúng (H, W)
+    top  = random.randint(0, new_h - H)
+    left = random.randint(0, new_w - W)
+    image = image.crop((left, top, left + W, top + H))
+    label = label.crop((left, top, left + W, top + H))
+
+    # 3. Random horizontal flip (p=0.5)
+    if random.random() > 0.5:
+        image = image.transpose(Image.FLIP_LEFT_RIGHT)
+        label = label.transpose(Image.FLIP_LEFT_RIGHT)
+
+    # 4. Color jitter (chỉ áp dụng cho image, không áp dụng label)
+    image = self._color_jitter(image)
+    return image, label
+\end{lstlisting}
+
+Tham số color jitter: \texttt{brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1} —
+đây là giá trị phổ biến trong các paper segmentation Cityscapes.
+
+\begin{table}[H]
+  \centering
+  \caption{So sánh augmentation cũ và mới}
+  \begin{tabular}{lcc}
+    \toprule
+    \textbf{Augmentation} & \textbf{Cũ} & \textbf{Mới} \\
+    \midrule
+    Resize cố định $512\times1024$ & \checkmark & \checkmark \\
+    Horizontal flip ($p=0.5$) & \checkmark & \checkmark \\
+    Random scale {[}0.75, 1.5{]} & $\times$ & \checkmark \\
+    Random crop về $512\times1024$ & $\times$ & \checkmark \\
+    Color jitter & $\times$ & \checkmark \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{Hướng dẫn chạy lại}
+% ============================================================
+
+\subsection{Lệnh train lại từ đầu (khuyến nghị)}
+
+\begin{lstlisting}[language=bash, caption={Chạy trên GPU thuê}]
+cd /path/to/sac_project/scripts
+
+# Train lại từ đầu với kiến trúc và schedule mới
+python new_feature/train.py --reset --epochs 60 --batch-size 4
+
+# Theo dõi kết quả
+tail -f ../outputs/new_feature/training/train_metrics.csv
+\end{lstlisting}
+
+\textbf{Lưu ý:} Bắt buộc dùng \texttt{--reset} vì checkpoint cũ được train với
+stride-32. Load checkpoint cũ vào model stride-8 sẽ cho feature distribution sai —
+cần train lại từ pretrained ImageNet backbone.
+
+\subsection{Kỳ vọng kết quả}
+
+\begin{table}[H]
+  \centering
+  \caption{Kỳ vọng val mIoU theo từng cải tiến}
+  \begin{tabular}{lcc}
+    \toprule
+    \textbf{Cấu hình} & \textbf{val mIoU (ước tính)} & \textbf{Ghi chú} \\
+    \midrule
+    Baseline (trước cải tiến) & $\approx 0.79$ & stride-32, lr cố định \\
+    + Poly LR & $\approx 0.82$–$0.84$ & — \\
+    + Dilated stride-8 & $\approx 0.85$–$0.87$ & Cải tiến lớn nhất \\
+    + Augmentation & $\approx 0.87$–$0.90$ & Mục tiêu paper \\
+    \midrule
+    \textbf{Paper reference} & $\mathbf{\geq 0.87}$ & Table IV, SA-X265 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Đánh giá sau khi train xong}
+
+\begin{lstlisting}[language=bash, caption={Chạy evaluate trên toàn bộ val set}]
+python new_feature/evaluate.py --num-frames 500 --preset fast
+\end{lstlisting}
+
+Kết quả lưu tại \texttt{outputs/new\_feature/evaluation/<timestamp>/}:
+\begin{itemize}
+  \item \texttt{table2\_cityscapes.csv} — PSNR, SSIM, SA-PSNR, SA-SSIM
+  \item \texttt{table4\_segmentation.csv} — mIoU, iIoU trên frame đã nén
+  \item \texttt{results\_summary.txt} — bảng so sánh với paper reference
+\end{itemize}
+
+% ============================================================
+\section{Tóm tắt thay đổi}
+% ============================================================
+
+\begin{table}[H]
+  \centering
+  \caption{Danh sách đầy đủ các thay đổi}
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{p{3.5cm} p{4cm} p{5.5cm}}
+    \toprule
+    \textbf{File} & \textbf{Thay đổi} & \textbf{Lý do} \\
+    \midrule
+    \texttt{ccnet\_4class.py} &
+      Dilated layer3 (×2), layer4 (×4) &
+      Feature map: $16\times32 \to 64\times128$; upsample $\times32 \to \times8$ \\
+    \cmidrule{2-3}
+    & CrissCross Attention viết lại thành row+col &
+      Full $N\times N$ ($N=8192$) không khả thi với stride-8; row+col tương đương \\
+    \midrule
+    \texttt{train.py} &
+      Poly LR decay (power=0.9) &
+      LR cố định plateau sớm; poly LR là standard trong dense-prediction \\
+    \cmidrule{2-3}
+    & Separate LR: backbone $\times0.1$ vs head $\times1$ &
+      Backbone pretrained — fine-tune chậm; head random init — train nhanh \\
+    \cmidrule{2-3}
+    & Epochs: $47 \to 60$ &
+      Cần thêm epoch để tận dụng phase LR thấp \\
+    \cmidrule{2-3}
+    & \texttt{strict=False} khi load checkpoint &
+      Cho phép warm-start khi kiến trúc thay đổi \\
+    \midrule
+    \texttt{dataset.py} &
+      Random scale {[}0.75, 1.5{]} + random crop &
+      Scale invariance; standard trong segmentation training \\
+    \cmidrule{2-3}
+    & Color jitter &
+      Tránh overfit màu sắc; tăng robustness \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\end{document}

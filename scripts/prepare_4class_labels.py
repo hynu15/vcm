@@ -1,17 +1,27 @@
 import os
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **_):
+        return iterable
 
 # Đường dẫn
-DATA_ROOT = os.path.expanduser('~/sac_project/data')
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+DATA_ROOT = os.environ.get('SAC_DATA_ROOT', os.path.join(PROJECT_ROOT, 'data'))
 GT_FINE_ROOT = os.path.join(DATA_ROOT, 'gt_4class', 'gtFine_trainvaltest', 'gtFine')
-GT_4CLASS_ROOT = os.path.join(DATA_ROOT, 'gt_4class')
+GT_LABEL_ROOT = os.path.join(DATA_ROOT, 'gt_4class')
 
-# Class IDs theo Cityscapes (theo paper)
-CONSTRUCTION_IDS = [11, 12, 13, 14, 15, 16]   # building, wall, fence, guard rail, bridge, tunnel
-NATURE_IDS      = [21, 22]                    # vegetation, terrain
-SKY_ID          = 23
+# Mapping Cityscapes labelIds → 4 class SAC
+# Class 0 = ROI     : đường, xe, người — mọi pixel không thuộc 3 class dưới (default)
+# Class 1 = sky     : labelId 23
+# Class 2 = construction: labelId 11–16 (building, wall, fence, guard rail, bridge, tunnel)
+# Class 3 = nature  : labelId 21–22 (vegetation, terrain)
+
+SKY_IDS           = [23]
+CONSTRUCTION_IDS  = [11, 12, 13, 14, 15, 16]
+NATURE_IDS        = [21, 22]
 
 
 def collect_label_files(split):
@@ -24,7 +34,6 @@ def collect_label_files(split):
         city_dir = os.path.join(split_root, city)
         if not os.path.isdir(city_dir):
             continue
-
         for fname in os.listdir(city_dir):
             if fname.endswith('_labelIds.png'):
                 label_files.append((city, fname, os.path.join(city_dir, fname)))
@@ -33,36 +42,38 @@ def collect_label_files(split):
 
 def convert_to_4class(label_path, save_path):
     label = np.array(Image.open(label_path))
-    mask = np.zeros_like(label, dtype=np.uint8)
-    
-    # construction = 2
+    mask = np.zeros_like(label, dtype=np.uint8)  # default = 0 (ROI)
+    for sid in SKY_IDS:
+        mask[label == sid] = 1
     for cid in CONSTRUCTION_IDS:
         mask[label == cid] = 2
-    # nature = 3
     for nid in NATURE_IDS:
         mask[label == nid] = 3
-    # sky = 1
-    mask[label == SKY_ID] = 1
-    # còn lại = 0 (ROI)
-    
-    # Lưu dưới dạng PNG 8-bit
     Image.fromarray(mask).save(save_path)
 
 
-# Xử lý val trước (nhanh để test)
-print("Đang chuẩn bị label cho val set...")
-val_list = collect_label_files('val')
+print("⚠️  Cityscapes test split không có ground truth semantic labels.")
+print("    Chỉ xử lý train và val.\n")
+print("4-class mapping:")
+print("  0 = ROI          (road, vehicle, person, ...)")
+print("  1 = sky          (labelId 23)")
+print("  2 = construction (labelId 11-16: building/wall/fence/guard rail/bridge/tunnel)")
+print("  3 = nature       (labelId 21-22: vegetation/terrain)\n")
 
-for city, fname, label_path in tqdm(val_list):
-    save_path = os.path.join(
-        GT_4CLASS_ROOT,
-        'val',
-        city,
-        fname.replace('_labelIds.png', '_4class.png')
-    )
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    convert_to_4class(label_path, save_path)
+for split in ("train", "val"):
+    print(f"Đang chuẩn bị 4-class label cho {split} set...")
+    split_list = collect_label_files(split)
 
-print("✅ Hoàn thành label 4-class cho val set!")
-print(f"   Số ảnh: {len(val_list)}")
-print(f"   Lưu tại: {GT_4CLASS_ROOT}/val/")
+    for city, fname, label_path in tqdm(split_list):
+        save_path = os.path.join(
+            GT_LABEL_ROOT,
+            split,
+            city,
+            fname.replace('_gtFine_labelIds.png', '_gtFine_4class.png')
+        )
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        convert_to_4class(label_path, save_path)
+
+    print(f"✅ Hoàn thành 4-class label cho {split} set!")
+    print(f"   Số ảnh: {len(split_list)}")
+    print(f"   Lưu tại: {GT_LABEL_ROOT}/{split}/")

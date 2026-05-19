@@ -10,7 +10,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
-import seaborn as sns
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -269,6 +268,44 @@ def plot_pareto_front(df, output_dir):
     plt.close()
 
 
+def _draw_heatmap(ax, pivot, cmap, fmt, cbar_label, center=None):
+    """Draw an annotated heatmap using matplotlib (replaces sns.heatmap)."""
+    data = pivot.values.astype(float)
+    row_labels = [str(v) for v in pivot.index]
+    col_labels = [str(v) for v in pivot.columns]
+
+    vmin, vmax = np.nanmin(data), np.nanmax(data)
+    if center is not None:
+        half = max(abs(vmin - center), abs(vmax - center))
+        vmin, vmax = center - half, center + half
+
+    im = ax.imshow(data, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
+    cbar = ax.figure.colorbar(im, ax=ax)
+    cbar.set_label(cbar_label, fontsize=10, fontweight="bold")
+
+    ax.set_xticks(range(len(col_labels)))
+    ax.set_xticklabels(col_labels)
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels)
+
+    # Annotate cells
+    text_thresh = (vmin + vmax) / 2
+    for r in range(data.shape[0]):
+        for c in range(data.shape[1]):
+            val = data[r, c]
+            if np.isnan(val):
+                continue
+            color = "white" if val < text_thresh else "black"
+            ax.text(c, r, format(val, fmt), ha="center", va="center",
+                    fontsize=9, color=color, fontweight="bold")
+
+    # Draw grid lines
+    for r in range(data.shape[0] + 1):
+        ax.axhline(r - 0.5, color="black", linewidth=0.8)
+    for c in range(data.shape[1] + 1):
+        ax.axvline(c - 0.5, color="black", linewidth=0.8)
+
+
 def plot_config_heatmap(df, output_dir):
     """
     Plot heatmap of SA-PSNR for each CRF combination.
@@ -283,17 +320,8 @@ def plot_config_heatmap(df, output_dir):
     )
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    sns.heatmap(
-        pivot_psnr,
-        annot=True,
-        fmt=".2f",
-        cmap="YlGn",
-        cbar_kws={"label": "SA-PSNR (dB)"},
-        linewidths=1,
-        linecolor="black",
-        ax=ax,
-    )
-
+    _draw_heatmap(ax, pivot_psnr, cmap="YlGn", fmt=".2f",
+                  cbar_label="SA-PSNR (dB)", center=None)
     ax.set_xlabel("CRF_ROI (lower = higher quality)", fontsize=12, fontweight="bold")
     ax.set_ylabel("CRF_NON (lower = higher quality)", fontsize=12, fontweight="bold")
     ax.set_title("SA-PSNR Heatmap: CRF Combination Effects", fontsize=14, fontweight="bold")
@@ -313,18 +341,8 @@ def plot_config_heatmap(df, output_dir):
     )
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    sns.heatmap(
-        pivot_delta,
-        annot=True,
-        fmt=".2f",
-        cmap="RdYlGn",
-        center=0,
-        cbar_kws={"label": "Δ SA-PSNR vs Traditional (dB)"},
-        linewidths=1,
-        linecolor="black",
-        ax=ax,
-    )
-
+    _draw_heatmap(ax, pivot_delta, cmap="RdYlGn", fmt=".2f",
+                  cbar_label="Δ SA-PSNR vs Traditional (dB)", center=0)
     ax.set_xlabel("CRF_ROI", fontsize=12, fontweight="bold")
     ax.set_ylabel("CRF_NON", fontsize=12, fontweight="bold")
     ax.set_title("Quality Gain Heatmap: Δ SA-PSNR vs Traditional", fontsize=14, fontweight="bold")

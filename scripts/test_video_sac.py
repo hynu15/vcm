@@ -59,8 +59,7 @@ def build_roi_mask(mask, orig_rgb, roi_classes, force_sky_nonroi=False):
         top_region[: int(0.5 * h), :] = True
         sky_like = sky_color & top_region
 
-        # If model predicts class 1 (sky), prioritize removing it from ROI.
-        sky_like = sky_like | (mask == 1)
+        # mask==1 is non_ROI, those pixels are already excluded from ROI
         roi_mask[sky_like] = 0
 
     roi_mask = macroblock_align_filter(roi_mask, 16)
@@ -209,7 +208,7 @@ def main():
     else:
         model_path = args.model
     
-    model, model_name = load_segmentation_model(model_path, device=device, num_classes=4)
+    model, model_name = load_segmentation_model(model_path, device=device, num_classes=2)
     print(f"📊 Model: {model_name} | {os.path.basename(model_path)}")
     print(f"🎯 ROI classes: {roi_classes} | force_sky_nonroi={args.force_sky_nonroi}")
     

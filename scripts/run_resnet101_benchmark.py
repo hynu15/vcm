@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=1500)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--eval-frames", type=int, default=20)
-    parser.add_argument("--crf-roi", type=int, default=25)
+    parser.add_argument("--crf-roi", type=int, default=23)
     parser.add_argument("--crf-non", type=int, default=32)
     parser.add_argument("--preset", type=str, default="medium")
     parser.add_argument("--latency-frames", type=int, default=8)

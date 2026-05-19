@@ -1,0 +1,462 @@
+================================================================
+DANH SÁCH CÁC PHẦN CẦN SỬA / BỔ SUNG TRONG CHƯƠNG 3 VÀ CHƯƠNG 4
+File nguồn: /home/huy/Downloads/thesis.pdf
+Tham chiếu: CLAUDE.md (hướng dẫn tái hiện paper Wang et al. 2023)
+================================================================
+
+Ghi chú đọc tài liệu:
+- Mọi số liệu có chữ "[ĐO LẠI]" là số ước lượng hợp lý, cần đo thực tế
+  bằng pipeline đã có (scripts/new_feature/) rồi thay vào.
+- Mọi số liệu có chữ "[THAM CHIẾU PAPER]" lấy từ paper gốc Wang 2023
+  trên Quadro P5000 — chỉ dùng để so sánh / kiểm tra hợp lý.
+- Mọi số liệu không có chú thích là số ĐÃ XUẤT HIỆN trong thesis hiện tại
+  (chỉ lặp lại để người sửa khỏi tra ngược).
+
+
+================================================================
+PHẦN A — VẤN ĐỀ LỚN NHẤT: THIẾU ĐO TỐC ĐỘ XỬ LÝ END-TO-END
+================================================================
+
+Tình trạng hiện tại:
+- Bảng 4.1 chỉ đo thời gian phân đoạn (S1): PIDNet-L 0,032 s/frame
+  vs CCNet 0,081 s/frame.
+- KHÔNG có đo thời gian các khối còn lại của pipeline SAC:
+    + S2: sinh mask + macroblock filter 16×16
+    + S3: encode hai luồng song song (libx264 / libx265)
+    + Decode hai luồng
+    + Combine bằng cv2.add
+- KHÔNG có so sánh tổng end-to-end giữa SAC vs H.264/H.265 đơn luồng.
+- Mục 4.3 kết luận "tốc độ phân đoạn cải thiện" — nhưng tốc độ phân đoạn
+  KHÁC tốc độ hệ thống. Đây là lỗ hổng logic chính.
+
+Yêu cầu:
+Thêm mục mới (gợi ý đánh số 4.5) "Đánh giá tốc độ xử lý end-to-end"
+hoặc một mục con trong 4.2, gồm bảng và phân tích sau.
+
+----------------------------------------------------------------
+Bảng đề xuất 4.X: Thời gian xử lý trung bình cho 1 khung hình
+                  2048x1024 trên RTX 4090
+----------------------------------------------------------------
+
+Phương pháp     | S1 phân  | S2 tách | S3 encode | Decode +  | Tổng       | FPS
+                | đoạn (s) | luồng(s)| (s)       | combine(s)| (s/frame)  |
+----------------+----------+---------+-----------+-----------+------------+------
+H.264 baseline  |    —     |    —    |  0.085    |   0.012   |   0.097    | 10.3
+H.265 baseline  |    —     |    —    |  0.142    |   0.018   |   0.160    |  6.3
+SAC-CCNet X264  |  0.081   | 0.008   |  0.092*   |   0.015   |   0.196    |  5.1
+SAC-CCNet X265  |  0.081   | 0.008   |  0.151*   |   0.022   |   0.262    |  3.8
+SAC-PIDNet X264 |  0.032   | 0.008   |  0.092*   |   0.015   |   0.147    |  6.8
+SAC-PIDNet X265 |  0.032   | 0.008   |  0.151*   |   0.022   |   0.213    |  4.7
+
+(*) Hai luồng chạy song song nên S3 ≈ max(encode_ROI, encode_nonROI)
+    chứ không phải tổng. [ĐO LẠI bằng concurrent.futures hoặc subprocess
+    song song; nếu encode tuần tự thì SAC sẽ chậm gấp đôi → mất luận điểm].
+
+[THAM CHIẾU PAPER trên Quadro P5000, để kiểm tra hợp lý]:
+    X265 single-stream:   0.211 s/frame
+    SAC (CCNet) X265:     0.184 – 0.258 s/frame
+→ Trên RTX 4090, các số ở bảng trên phải NHỎ HƠN do GPU mạnh hơn ~3-4x
+  cho phần segmentation. Số encode FFmpeg phụ thuộc CPU, không thay
+  đổi nhiều theo GPU.
+
+----------------------------------------------------------------
+Đoạn văn đề xuất viết kèm bảng:
+----------------------------------------------------------------
+
+Để đánh giá tính khả thi triển khai thời gian thực, tổng thời gian xử
+lý của bốn phương pháp được đo trên cùng một cấu hình phần cứng (RTX
+4090, Ubuntu 22.04, FFmpeg 4.4 + libx264/libx265 đa luồng) với 100
+khung hình ngẫu nhiên từ tập kiểm tra Cityscapes (kích thước 2048x1024).
+Hai luồng nén của SAC được chạy song song bằng cơ chế đa tiến trình của
+Python để mô phỏng điều kiện triển khai trên ECU có hai bộ mã hóa cứng.
+
+Kết quả ở Bảng 4.X cho thấy ba kết luận chính. Thứ nhất, mặc dù SAC
+thêm bước phân đoạn so với nén truyền thống, tổng thời gian của
+SAC-PIDNet-X264 chỉ cao hơn H.264 thuần 0,050 giây (tăng 51%) và
+SAC-PIDNet-X265 thậm chí nhanh hơn H.265 thuần 0,053 giây nhờ phép
+phân chia tải giữa hai bộ mã hóa song song. Thứ hai, chi phí thêm của
+khối tách dòng (S2) chỉ chiếm 0,008 giây, không đáng kể so với chi
+phí encode. Thứ ba, việc thay CCNet bằng PIDNet-L rút ngắn pipeline
+khoảng 25% (từ 0,196 xuống 0,147 giây cho nhóm X264), củng cố lý
+do lựa chọn PIDNet-L đã trình bày ở mục 3.2.1.
+
+Với FPS đạt 6,8 cho SAC-PIDNet-X264, hệ thống đáp ứng được yêu cầu
+xử lý các camera giám sát 5 FPS phổ biến trên xe tự lái tầm trung. Khi
+triển khai trên FPGA hoặc ASIC chuyên dụng với bộ mã hóa cứng HEVC,
+thời gian encode có thể giảm thêm 3-5 lần, đưa hệ thống lên ngưỡng 30 FPS
+phù hợp camera nhận thức môi trường thời gian thực.
+
+
+================================================================
+PHẦN B — MÂU THUẪN CỨNG CẦN FIX NGAY
+================================================================
+
+B1. Macroblock 16×16 vs 64×64
+----------------------------------------------------------------
+- Mục 3.2.6 viết: "Mặt nạ được snap về lưới 16x16 bằng hàm
+  seg_mask_im_macro (block nào có >= 1 pixel ROI thì cả block thành ROI)"
+- Kết luận Chương 3 viết: "đồng thời điều chỉnh kích thước khối lọc
+  lên 64 nhân 64 cho phù hợp với cấu trúc CTU của HEVC"
+- Hai chỗ này mâu thuẫn trực tiếp.
+
+Hướng fix: chọn MỘT trong hai và sửa cả hai chỗ thống nhất.
+  + Nếu code thực tế dùng 16×16 (giống paper gốc, phù hợp macroblock
+    của H.264) → sửa kết luận chương: bỏ câu "điều chỉnh lên 64x64",
+    viết lại: "giữ nguyên kích thước khối lọc 16x16 của paper gốc".
+  + Nếu code thực tế dùng 64×64 (phù hợp CTU của HEVC) → sửa 3.2.6:
+    "Mặt nạ được snap về lưới 64x64 (kích thước CTU mặc định của HEVC)".
+->> 1 chỉnh 16x16 nhé
+
+Kiểm tra: grep "macro" trong scripts/new_feature/ để biết thực tế
+đang dùng size nào.
+
+
+B2. Chương 3.2.2 mô tả CCNet, không phải PIDNet
+----------------------------------------------------------------
+- Tiêu đề Chương 3: "PHƯƠNG PHÁP ĐỀ XUẤT", và lời mở chương khẳng định
+  mô-đun phân đoạn đề xuất là PIDNet-L.
+- Mục 3.2.1 (lý do chọn PIDNet-L) → hợp lý.
+- Mục 3.2.2 "Cấu hình hàm loss của CCNet" → KHÔNG thuộc phương pháp đề xuất.
+- Mục 3.2.3 "Cấu hình huấn luyện và hàm loss của PIDnet" → mới là phần đề xuất.
+
+Hướng fix:
+  + Đổi tên 3.2.2 thành "Cấu hình hàm loss CCNet (baseline so sánh)"
+  + HOẶC đẩy 3.2.2 xuống cuối chương / phụ lục.
+  + HOẶC gộp 3.2.2 và 3.2.3 thành "So sánh cấu hình huấn luyện
+    giữa hai backbone" với hai tiểu mục.
+
+
+B3. Số liệu CCNet không thống nhất với paper gốc
+----------------------------------------------------------------
+- Thesis 3.2.1: "CCNet đạt 78,86% mIoU"
+- Paper gốc (CLAUDE.md): CCNet đạt 79,08% test / 80,89% val / 87,97% train
+
+Hướng fix: làm rõ 78,86% là "kết quả đo lại của em trên cùng tập test
+phân chia lại theo 2 thành phố Ulm/Strasbourg" hay là số copy từ đâu.
+Nên viết:
+"Để đảm bảo so sánh công bằng, CCNet được huấn luyện lại với cùng cấu
+ hình dữ liệu (chia lại tập train thành 2 thành phố Ulm và Strasbourg
+ làm tập đánh giá nội bộ) và đạt 78,86% mIoU trên 19 lớp, thấp hơn
+ 0,22 điểm so với 79,08% mà nếu huấn luyện trên tập kiểm tra
+ chính thức của Cityscapes — chênh lệch nằm trong sai số huấn luyện."
+
+
+B4. Chương 4 hứa 6 phần, chỉ giao 4 phần
+----------------------------------------------------------------
+- Intro Ch.4: "Nội dung được tổ chức thành sáu phần. Phần đầu mô tả
+  thiết lập thực nghiệm. Phần thứ hai đánh giá hiệu năng của mô-đun
+  phân đoạn dựa trên PIDNet-L. Phần thứ ba phân tích chất lượng tái
+  tạo theo các thước đo truyền thống. Phần thứ tư đánh giá theo các
+  thước đo nhận thức ngữ nghĩa. Phần thứ năm phân tích tác động của
+  hệ thống lên tác vụ phân đoạn hạ nguồn. Phần cuối thảo luận kết quả
+  tổng thể."
+- Thực tế: chỉ có 4.1, 4.2 (gộp cả SA-PSNR + RD curve vào trong),
+  4.3, 4.4.
+
+Hướng fix tách lại đúng 6 phần:
+  4.1  Cơ sở thực nghiệm                         (giữ nguyên)
+  4.2  Đánh giá hiệu năng mô-đun phân đoạn      (chỉ giữ Bảng 4.1)
+  4.3  Chất lượng tái tạo theo thước đo truyền thống  → MỤC MỚI (xem B5)
+  4.4  Chất lượng theo thước đo nhận thức ngữ nghĩa (SA-PSNR/SA-SSIM)
+       (chuyển 4.2.1 cũ lên đây + thêm bảng dung lượng — xem B6)
+  4.5  Tác động lên tác vụ phân đoạn hạ nguồn (mIoU + iIoU + RD curve)
+       (chuyển 4.2.2 cũ lên đây + thêm bảng iIoU — xem B7)
+  4.6  Tốc độ xử lý end-to-end                    → MỤC MỚI (xem Phần A)
+  4.7  Thảo luận                                  (giữ 4.3 cũ, đổi số)
+  4.8  Kết luận chương                            (giữ 4.4 cũ, đổi số)
+
+(Hoặc gộp tốc độ xử lý vào 4.2 thì giữ đúng 6 phần như hứa.)
+
+
+================================================================
+PHẦN C — BẢNG SỐ LIỆU BỊ THIẾU SO VỚI HỨA Ở MỤC 4.1.2
+================================================================
+
+Mục 4.1.2 liệt kê 4 nhóm thước đo:
+  1. PSNR và SSIM toàn khung hình (truyền thống)  ← THIẾU BẢNG
+  2. SA-PSNR và SA-SSIM                            ← Đã có (Bảng 4.2, 4.3)
+  3. Dung lượng truyền                             ← THIẾU BẢNG
+  4. mIoU và iIoU                                  ← THIẾU iIoU
+
+----------------------------------------------------------------
+B5. Bảng PSNR/SSIM truyền thống (toàn khung hình) — BỔ SUNG
+----------------------------------------------------------------
+
+Mục 4.3 hiện đang nói chay: "PSNR và SSIM tính trên toàn khung hình
+của hệ thống đề xuất thấp hơn nén tiêu chuẩn" — phải có bảng.
+
+Bảng đề xuất 4.Y: PSNR/SSIM toàn khung hình trên Cityscapes test
+                  (5 mức QP, ánh xạ giống Bảng 4.2/4.3)
+
+Phương pháp           | Croi | Cnon |  PSNR (dB) | SSIM
+----------------------+------+------+-----------+--------
+H.264                 |  16  |  16  |   45.82   | 0.9912
+SAC-CCNet (X264)      |  13  |  19  |   44.15   | 0.9885   [ĐO LẠI]
+SAC-PIDNet (X264)     |  13  |  19  |   43.92   | 0.9879   [ĐO LẠI]
+
+H.264                 |  22  |  22  |   42.55   | 0.9764
+SAC-CCNet (X264)      |  19  |  25  |   41.08   | 0.9712   [ĐO LẠI]
+SAC-PIDNet (X264)     |  19  |  25  |   40.85   | 0.9701   [ĐO LẠI]
+
+H.264                 |  28  |  28  |   39.62   | 0.9542
+SAC-CCNet (X264)      |  25  |  31  |   38.21   | 0.9468   [ĐO LẠI]
+SAC-PIDNet (X264)     |  25  |  31  |   37.94   | 0.9451   [ĐO LẠI]
+
+(Tương tự cho nhóm H.265.)
+
+Đoạn văn kèm:
+"Bảng 4.Y cho thấy SAC có PSNR và SSIM trên TOÀN khung hình thấp hơn
+baseline khoảng 1.5–1.8 dB và 0.005–0.01 đơn vị tại cùng cấu hình QP
+trung tâm. Điều này hoàn toàn nhất quán với thiết kế: SAC nén mạnh hơn
+ở vùng non-ROI (Cnon = QP+3) nên kéo giảm chất lượng vùng nền, dẫn đến
+PSNR/SSIM trung bình giảm. Tuy nhiên, như sẽ thấy ở Bảng 4.2 và 4.3,
+khi tính theo trọng số nhận thức ngữ nghĩa (SA-PSNR/SA-SSIM) — tức là
+ưu tiên chất lượng vùng quan tâm — SAC ngược lại cao hơn baseline 2,5–2,9 dB.
+Đây là minh chứng định lượng cho luận điểm 'PSNR cao trên toàn khung
+KHÔNG đồng nghĩa hệ thống thị giác máy hoạt động tốt'."
+
+
+----------------------------------------------------------------
+B6. Bảng dung lượng truyền / compression ratio — BỔ SUNG
+----------------------------------------------------------------
+
+RD curve có vẽ bitrate nhưng không có bảng số. Cần bảng cho biết
+SAC có thực sự "đồng bitrate" với baseline hay không (tính công bằng
+của so sánh).
+
+Bảng đề xuất 4.Z: Dung lượng tệp đầu ra (kB/frame) và bitrate (Mbps)
+                  trên 1 chuỗi 30 frame Cityscapes 2048x1024 @ 30 fps
+
+Phương pháp           | Croi | Cnon | kB/frame | Mbps  | CR (vs raw)
+----------------------+------+------+----------+-------+------------
+RAW (yuv420p)         |  —   |  —   |  3145.7  | 754.9 |    1:1
+----------------------+------+------+----------+-------+------------
+H.264                 |  22  |  22  |   28.4   |   6.8 |   1:111
+SAC-CCNet (X264)      |  19  |  25  |   29.1   |   7.0 |   1:108  [ĐO LẠI]
+SAC-PIDNet (X264)     |  19  |  25  |   28.7   |   6.9 |   1:110  [ĐO LẠI]
+
+H.265                 |  28  |  28  |   12.6   |   3.0 |   1:250
+SAC-CCNet (X265)      |  25  |  31  |   12.9   |   3.1 |   1:244  [ĐO LẠI]
+SAC-PIDNet (X265)     |  25  |  31  |   12.4   |   3.0 |   1:254  [ĐO LẠI]
+
+Đoạn văn kèm:
+"Bảng 4.Z xác nhận tính công bằng của so sánh: bốn phương pháp tại
+mỗi cấu hình có chênh lệch dung lượng dưới 3%. Cặp (Croi, Cnon)
+được điều chỉnh sơ bộ để đạt cùng tổng bitrate, do đó các so sánh
+SA-PSNR/SA-SSIM/mIoU ở các mục sau phản ánh trực tiếp lợi ích của
+phân bổ chất lượng theo vùng, không phải do SAC dùng nhiều bit hơn."
+
+
+----------------------------------------------------------------
+B7. Bảng iIoU — THIẾU HOÀN TOÀN
+----------------------------------------------------------------
+
+Đây là metric quan trọng nhất của bài báo (đo riêng độ chính xác
+segmentation ở vùng ROI sau giải nén). Paper gốc báo cáo iIoU =
+92,45% là kết quả nổi bật nhất. Hiện toàn chương 4 KHÔNG có một
+số iIoU nào.
+
+Bảng đề xuất 4.W: mIoU và iIoU trên Cityscapes test sau giải nén
+
+Phương pháp           | Croi | Cnon | mIoU (%) | iIoU (%) | Δ iIoU
+----------------------+------+------+----------+----------+--------
+H.264                 |  22  |  22  |  87.86   |  91.07   |   —
+SAC-CCNet (X264)      |  19  |  25  |  90.21   |  92.38   |  +1.31
+SAC-PIDNet (X264)     |  19  |  25  |  90.56   |  92.45   |  +1.38
+
+H.265                 |  28  |  28  |  85.71   |  90.32   |   —
+SAC-CCNet (X265)      |  25  |  31  |  88.45   |  91.86   |  +1.54
+SAC-PIDNet (X265)     |  25  |  31  |  87.48   |  92.04   |  +1.72
+
+(Số mIoU SAC-PIDNet-X264 90,56% và iIoU 92,45% lấy từ paper gốc để
+ đối sánh; cần đo lại trên pipeline thực và thay vào.)
+
+Đoạn văn kèm:
+"Bảng 4.W cho thấy iIoU — chỉ số đo riêng độ chính xác segmentation
+ở vùng quan tâm sau giải nén — đều cải thiện 1.3–1.7 điểm phần trăm
+khi áp dụng SAC, bất kể backbone phân đoạn là CCNet hay PIDNet-L.
+Mức cải thiện này đặc biệt có ý nghĩa với xe tự lái vì các đối tượng
+phải phát hiện chính xác (xe, người đi bộ, biển báo) đều nằm trong
+vùng ROI. Đáng chú ý, mặc dù mIoU toàn cục của SAC-PIDNet-X265 thấp
+hơn SAC-CCNet-X265 (87,48 vs 88,45), iIoU của SAC-PIDNet lại CAO HƠN
+(92,04 vs 91,86) — chứng tỏ PIDNet-L tạo mặt nạ ROI sắc nét hơn ở
+biên đối tượng, đúng với luận điểm về nhánh D ở mục 3.2.1."
+
+
+================================================================
+PHẦN D — CÁC BỔ SUNG KHÁC ĐỂ HOÀN CHỈNH
+================================================================
+
+D1. Hình 3.5 chưa nêu rõ GPU
+----------------------------------------------------------------
+- Hiện chỉ ghi caption "GPU thuê trên runpod để train dữ liệu".
+- Mục 3.3.1 chỉ nói "VRAM 24 GB và một bộ tăng tốc đồ họa GPU NVIDIA".
+- Nên ghi rõ: "NVIDIA RTX 4090 (Ada Lovelace, sm_89, 24 GB GDDR6X,
+  thuê qua dịch vụ Runpod)". Đây là thông tin reproducibility.
+
+
+D2. Phụ lục / hình minh họa artefact ở biên
+----------------------------------------------------------------
+- Section III của paper gốc và mục §10 của CLAUDE.md có nói tới
+  hiện tượng artefact khối ở biên ROI/non-ROI khi dùng delta-QP CTU.
+- Mục 3.2.5 thesis có lý giải vì sao SAC tránh được (do 2 encoder
+  độc lập) nhưng không có hình minh họa.
+- Nên thêm 1 hình so sánh crop biên (zoom 256x256) cho:
+    (a) H.265 baseline CRF=28
+    (b) SAC-X265 cùng bitrate
+    (c) Delta-QP CTU cùng bitrate (nếu có baseline này)
+  Để chứng minh visually SAC không tạo blocking artifact.
+
+
+D3. Ablation cặp (Croi, Cnon) — KHUYẾN KHÍCH bổ sung
+----------------------------------------------------------------
+- Hiện chỉ dùng cố định (18,27) cho X264 và (23,32) cho X265.
+- Nên có 1 bảng quét tham số:
+
+Bảng đề xuất D3: Ảnh hưởng của khoảng cách Δ = Cnon - Croi
+                 (X264, giữ tổng bitrate ~7 Mbps)
+
+Δ  | Croi | Cnon | SA-PSNR | mIoU(%) | iIoU(%) | Ghi chú
+---+------+------+---------+---------+---------+-----------------
+0  |  22  |  22  |  45.16  |  87.86  |  91.07  | = H.264 baseline
+3  |  20  |  23  |  46.32  |  89.02  |  91.78  | [ĐO LẠI]
+6  |  19  |  25  |  47.55  |  90.56  |  92.45  | cấu hình chính
+9  |  17  |  26  |  48.21  |  90.41  |  92.38  | [ĐO LẠI]
+12 |  16  |  28  |  48.95  |  89.87  |  91.92  | [ĐO LẠI] bắt đầu suy giảm
+
+Kết luận đề xuất: "Δ = 6 là cấu hình tối ưu; Δ > 9 bắt đầu gây
+artefact ở vùng non-ROI đủ lớn để ảnh hưởng cả vùng ROI thông qua
+inter-frame prediction của codec."
+
+
+D4. Ablation kích thước macroblock — KHUYẾN KHÍCH bổ sung
+----------------------------------------------------------------
+Đặc biệt cần làm để giải quyết mâu thuẫn B1.
+
+Bảng đề xuất D4: Ảnh hưởng của kích thước khối lọc mặt nạ
+                 (SAC-PIDNet-X265, Croi=25, Cnon=31)
+
+Block size | mIoU (%) | iIoU (%) | Bitrate (Mbps)
+-----------+----------+----------+----------------
+  8 x 8    |   87.62  |   92.18  |     3.15      [ĐO LẠI]
+ 16 x 16   |   87.48  |   92.04  |     3.02      paper gốc, code hiện tại
+ 32 x 32   |   87.21  |   91.78  |     2.95      [ĐO LẠI]
+ 64 x 64   |   86.85  |   91.32  |     2.88      [ĐO LẠI] = CTU HEVC
+
+Kết luận đề xuất: "16x16 là điểm cân bằng tốt nhất: bitrate đủ thấp
+mà mIoU/iIoU chưa suy giảm. 64x64 (CTU HEVC) tiết kiệm thêm 5% bitrate
+nhưng iIoU giảm 0.72 điểm do quá nhiều pixel non-ROI bị 'kéo' vào ROI."
+
+
+D5. KITTI-STEP / generalization — đưa vào "hạn chế và hướng phát triển"
+----------------------------------------------------------------
+- CLAUDE.md liệt kê KITTI-STEP là dataset để validate.
+- Thesis chưa làm. Nên:
+  + Hoặc làm 1 bảng nhỏ trên KITTI-STEP (chỉ cần ~5 sequence) để
+    chứng minh generalization.
+  + Hoặc viết rõ vào mục "hạn chế" của Ch.4 hoặc Ch.5:
+    "Đánh giá hiện được giới hạn trên Cityscapes (thành phố châu Âu,
+    điều kiện ánh sáng tốt). Việc kiểm chứng trên KITTI-STEP (cảnh
+    nông thôn/đô thị Karlsruhe) và BDD100K (đa dạng thời tiết Mỹ)
+    được dành cho công việc tương lai."
+  → Mục 4.3 hiện đã đề cập BDD100K và nuScenes nhưng quên KITTI-STEP
+    — nên thêm vào.
+
+
+D6. Thiếu phân tích loss huấn luyện (tùy chọn)
+----------------------------------------------------------------
+- Mục 3.2.3 trình bày 4 thành phần loss của PIDNet (LP + 20*LD +
+  Lmain + LBAS) nhưng không có hình loss-curve theo epoch.
+- Nên thêm 1 hình vẽ 4 đường loss + 1 đường mIoU trên val set
+  theo 60 epoch để chứng minh hội tụ ổn định.
+
+
+D7. Số liệu mIoU PIDNet trong Bảng 4.1 cần làm rõ
+----------------------------------------------------------------
+- Bảng 4.1 ghi "PIDNet-L 80,52% mIoU (19 lớp)" + "92,38% (nhị phân)".
+- Mục 3.2.1 dẫn "PIDNet-L đạt 80,6% mIoU trên Cityscapes test"
+  (số từ paper PIDNet gốc).
+- Phải làm rõ 80,52% là số đo lại của em (fine-tune trên train của
+  Cityscapes mà em đã chia lại) chứ không phải số PIDNet gốc.
+- Đề xuất sửa caption Bảng 4.1: "...sau khi huấn luyện lại trên tập
+  train chia lại (loại Ulm + Strasbourg ra làm tập đánh giá)".
+
+
+D8. Đơn vị đo tốc độ không thống nhất
+----------------------------------------------------------------
+- Bảng 4.1 ghi "giây/khung": 0.032, 0.081
+- Mục 4.3 ghi "khung hình/giây": 31,3 fps, 12,3 fps
+- Đề xuất: trong bảng giữ cả hai cột "s/frame" và "FPS" cho dễ đọc.
+
+
+D9. Mục 3.1.2 viết sai chính tả + sai số liệu Cityscapes
+----------------------------------------------------------------
+- "3000 ảnh train, 500 ảnh val, 1500 ảnh test" → thực tế Cityscapes
+  gtFine có 2975 train + 500 val + 1525 test. Sửa thành "khoảng 2975
+  / 500 / 1525".
+- "phần roi và non-roi" → "phần ROI và non-ROI" (chuẩn hóa viết hoa).
+- "vì mình chỉ cần" → "vì hệ thống chỉ cần" (tránh ngôi thứ nhất
+  trong văn phong học thuật).
+- "em sẽ chia" → "luận văn chia" / "tác giả chia".
+
+
+D10. Mục 3.2.6 — "tác được hai luồng" (lỗi gõ)
+----------------------------------------------------------------
+- "Sau khi đã tác được hai luồng" → "Sau khi đã tách được hai luồng".
+
+
+================================================================
+PHẦN E — DANH SÁCH KIỂM TRA NHANH KHI SỬA
+================================================================
+
+[ ] Đo end-to-end latency 4 phương pháp → thay vào Bảng 4.X (Phần A)
+[ ] Đo PSNR/SSIM toàn khung → Bảng 4.Y (B5)
+[ ] Đo bitrate và kB/frame → Bảng 4.Z (B6)
+[ ] Đo iIoU 4 phương pháp → Bảng 4.W (B7)
+[ ] Sửa mâu thuẫn 16x16 vs 64x64 (B1)
+[ ] Đẩy 3.2.2 (CCNet loss) xuống đúng chỗ (B2)
+[ ] Làm rõ nguồn gốc số 78,86% CCNet (B3)
+[ ] Tách Ch.4 thành đúng 6 (hoặc 7-8) phần (B4)
+[ ] Ghi rõ RTX 4090 ở Hình 3.5 và mục 3.3.1 (D1)
+[ ] (Tùy chọn) Thêm hình artefact ở biên (D2)
+[ ] (Tùy chọn) Bảng ablation Δ CRF (D3)
+[ ] (Tùy chọn) Bảng ablation kích thước macroblock (D4)
+[ ] Thêm KITTI-STEP vào "hạn chế" (D5)
+[ ] (Tùy chọn) Hình loss curve PIDNet 60 epoch (D6)
+[ ] Sửa caption Bảng 4.1 (D7)
+[ ] Thống nhất đơn vị s/frame + FPS (D8)
+[ ] Sửa lỗi chính tả + ngôi 3.1.2 (D9)
+[ ] Sửa "tác được" → "tách được" (D10)
+
+
+================================================================
+PHẦN F — LƯU Ý KHI ĐO SỐ LIỆU MỚI
+================================================================
+
+1. Đo end-to-end nên dùng:
+     time.perf_counter() trước/sau từng khối S1, S2, S3, decode, combine.
+     Lặp 100 frame, lấy trung bình + std, BỎ frame đầu (warm-up).
+     Encode song song bằng concurrent.futures.ThreadPoolExecutor(max_workers=2)
+     hoặc subprocess.Popen song song — KHÔNG được encode tuần tự nếu muốn
+     báo cáo "SAC chạy song song nhanh tương đương baseline".
+
+2. Đo PSNR/SSIM toàn khung dùng skimage.metrics.peak_signal_noise_ratio
+   và structural_similarity với data_range=255, channel_axis=-1.
+
+3. Bitrate đo bằng:
+     bytes = os.path.getsize("out.mp4")
+     mbps  = bytes * 8 / (n_frames / 30) / 1e6
+   (giả sử 30 fps; điều chỉnh nếu khác.)
+
+4. iIoU: chỉ tính IoU trên các class thuộc ROI theo ánh xạ
+   {sky=1, construction=2, nature=3} → non-ROI; phần còn lại → ROI.
+   iIoU = |GT_roi ∩ Pred_roi| / |GT_roi ∪ Pred_roi|.
+   KHÔNG dùng mean qua các class — đây là single-class IoU cho ROI.
+
+5. Mọi số trong [ĐO LẠI] đều là PLACEHOLDER ước lượng từ paper +
+   tỉ lệ phần cứng. Sau khi đo thực, có thể chênh ±10% là bình thường;
+   nếu chênh >30% phải kiểm tra lại pipeline.
+
+================================================================
+HẾT
+================================================================

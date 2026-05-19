@@ -1,0 +1,811 @@
+\documentclass[12pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese,english]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm, top=3cm, bottom=3cm}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{setspace}
+\usepackage{listings}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  showstringspaces=false,
+  frame=single,
+  framesep=4pt,
+  columns=fullflexible,
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  citecolor=red!60!black,
+}
+
+\title{\textbf{So sánh hai implementation tái hiện bài báo SAC:\\
+\emph{Semantic-Aware-Video-Compression-for-Automotive-Cameras}\\
+\textbf{vs.} \emph{new\_branch}}}
+\author{Nguyễn Hữu Huy}
+\date{17 tháng 5, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Mục tiêu báo cáo}
+
+Cả hai folder cùng nhằm tái hiện bài báo \emph{Semantic-Aware Video Compression for Automotive
+Cameras} (Wang et al., IEEE TIV 2023):
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{scripts/Semantic-Aware-Video-Compression-for-Automotive-Cameras/}
+        — viết tắt \textbf{[paper-folder]}. Đây là fork đã được vá lỗi từ repo gốc của
+        nhóm tác giả, dùng kiến trúc \emph{tự thiết kế} (không phải CCNet chuẩn).
+  \item \texttt{scripts/new\_branch/} — viết tắt \textbf{[new-branch]}. Đây là bản tái
+        hiện ``đúng nguyên văn CLAUDE.md'' — dùng CCNet ResNet-101 dilated + RCCA gốc.
+\end{itemize}
+
+Mặc dù \emph{new-branch} sát với mô tả paper hơn về mặt câu chữ, \textbf{kết quả thực
+tế của paper-folder lại tốt hơn} (tiệm cận con số trong Bảng II/IV gốc). Báo cáo này
+trả lời ba câu hỏi:
+\begin{enumerate}[leftmargin=2em]
+  \item Sự khác biệt cụ thể giữa hai bản code là gì?
+  \item Nguyên nhân nào gây ra chênh lệch kết quả?
+  \item Có thể cải thiện kết quả của bản \emph{code-paper} (new-branch) như thế nào?
+\end{enumerate}
+
+\section{Bảng tổng quan các khác biệt}
+
+\begin{table}[H]
+\centering
+\small
+\caption{So sánh side-by-side toàn pipeline. Ô \textbf{in đậm} là phần khác biệt cốt
+lõi đóng vai trò quan trọng nhất cho chênh lệch kết quả.}
+\label{tab:overall}
+\begin{tabular}{p{3.3cm} p{5.4cm} p{5.4cm}}
+\toprule
+\textbf{Hạng mục} & \textbf{paper-folder} & \textbf{new-branch} \\
+\midrule
+Kiến trúc backbone &
+  CNN tự thiết kế: 3 res-block 64$\to$128$\to$256 + 3 down (MaxPool), output $512$ ch &
+  \textbf{ResNet-101 dilated} chuẩn CCNet (4 layer, output $2048$ ch, stride 8) \\
+\addlinespace
+Normalization &
+  \textbf{GroupNorm(4, $\cdot$)} + LeakyReLU &
+  BatchNorm2d + ReLU (CCNet gốc thay từ InPlaceABNSync) \\
+\addlinespace
+Tham số &
+  $\sim$10--15 M &
+  $\sim$70 M (ResNet-101 + RCCA + DSN) \\
+\addlinespace
+Decoder head &
+  \textbf{Multi-scale fusion}: RCCA $\to$ bottleneck + 3 nhánh ConvTranspose (S3,S2,S1)
+  concat $\to$ out conv &
+  Bottleneck đơn $\to$ bilinear $\times 8$ \\
+\addlinespace
+Aux supervision &
+  \emph{Không có} (đã có multi-scale ở head) &
+  \textbf{DSN} từ layer3, loss $= L_{\text{main}} + 0.4\,L_{\text{aux}}$ \\
+\addlinespace
+Output &
+  \texttt{softmax(logits)} trả về trong forward &
+  Logits thô; softmax bên ngoài khi tính dice \\
+\addlinespace
+Loss &
+  Dice + soft cross-entropy với one-hot label đã làm mịn &
+  Dice + \texttt{nn.CrossEntropyLoss} trên label rắn 0--3 \\
+\addlinespace
+Pretrain &
+  \emph{Không}, train from scratch &
+  ResNet-101 ImageNet pretrained \\
+\addlinespace
+Tiền xử lý ảnh &
+  \textbf{RGB} (3 kênh gốc), resize bicubic order=3, \textbf{z-score per-image} &
+  \textbf{Grayscale}-as-3ch (Y luma), resize bilinear, chuẩn hoá ImageNet mean/std \\
+\addlinespace
+Label resize &
+  \textbf{One-hot $\to$ resize order=1 (linear)} = label mềm ở biên &
+  Nearest-neighbor trên class id rắn \\
+\addlinespace
+Augment &
+  \emph{Không} &
+  Random horizontal flip + random scale (0.75--1.25) + random crop \\
+\addlinespace
+Optimizer & Adam 3e-4, $\beta=(0.9,0.999)$, wd 1e-5, batch 4, FP16 &
+                Adam 3e-4 idem, batch 4, AMP, clip-grad 35 \\
+\addlinespace
+Epochs & 200 (mặc định), checkpoint mỗi 50 step & 47 (theo paper) \\
+\midrule
+\textbf{Khối S2 — sinh mask ROI} &
+  \textbf{Dùng GT $\,$\texttt{\_gtFine\_4class.png}} cho cả train/val/test (đã merge trực tiếp từ Cityscapes GT) &
+  \textbf{Dùng prediction} của mạng segmentation trên ảnh gốc \\
+\addlinespace
+Macroblock filter &
+  Vòng for Python, kiểm tra \texttt{patch.max()==1} &
+  \texttt{F.max\_pool2d(kernel=16, stride=16)} + upsample (vectorised) \\
+\addlinespace
+Codec params &
+  \texttt{libx264}/\texttt{libx265}, FPS=\textbf{17}, preset medium, không cố định GOP &
+  Idem, FPS=\textbf{30}, GOP cố định \texttt{keyint=min-keyint=30} \\
+\addlinespace
+Reconstruct &
+  \texttt{cv2.add(IA, BA)} — saturating add &
+  \texttt{np.where(mask, roi\_dec, non\_dec)} dùng lại mask gốc \\
+\addlinespace
+iIOU đánh giá &
+  Binary GT vs binary pred (file PNG đã lưu) &
+  Tính mIoU 4 lớp + iIoU lớp ROI từ pred (sau khi seg lại trên ảnh tái tạo) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Phân tích nguyên nhân paper-folder cho kết quả tốt hơn}
+
+\subsection{Nguyên nhân \#1 — Khối S2 dùng MASK GT thay vì PRED (quan trọng nhất)}
+
+\textbf{Đây là chênh lệch lớn nhất.} Đọc trực tiếp
+\texttt{Codes/CCNet/TwoStream\_generate.py} dòng 84:
+\begin{lstlisting}[language=Python]
+seg_path = _get_label_path(img_path)        # _gtFine_4class.png
+seg_4class = cv2.imread(seg_path, cv2.IMREAD_GRAYSCALE)
+...
+roi_binary = (seg_4class == 0).astype(np.uint8)
+roi_macro  = seg_mask_im_macro(roi_binary)
+\end{lstlisting}
+
+paper-folder \emph{không dùng output của mạng} để tạo mask. Mask ROI lấy từ
+\textbf{ground-truth 4 lớp} đã merge sẵn của Cityscapes. Hệ quả:
+\begin{itemize}[leftmargin=2em]
+  \item Không có lỗi segmentation lan sang khối nén $\to$ ROI thật sự được phủ chính
+        xác, không bỏ sót pixel vật thể quan trọng.
+  \item \texttt{iIOU} sau nén được đo bằng cách so GT 4-class với mask
+        \emph{dự đoán bởi mạng trên frame tái tạo} (\texttt{outputs/ccnet\_test\_debug}).
+        Vì ROI input đã được nén nhẹ (CRF=18) bằng mask GT, model dễ dàng đạt iIOU cao.
+\end{itemize}
+
+Trong khi đó, new-branch (\texttt{evaluate.py} dòng 174):
+\begin{lstlisting}[language=Python]
+seg_lowres = _seg_predict(model, img_t, device)
+roi_masks.append(build_roi_mask(seg_lowres, target_hw=FRAME_HW))
+\end{lstlisting}
+
+dùng prediction. Nếu mạng segmentation chưa đạt iIoU $>$ 95\%, một số pixel ROI sẽ bị
+gán nhãn non-ROI, bị nén CRF=27, mất chi tiết, kéo mIoU \emph{sau} nén xuống.
+
+\textbf{Hiệu ứng định lượng (ước tính):} chỉ cần $\sim$5\% pixel ROI bị mis-classify
+thành non-ROI ở biên, mIoU sau nén có thể giảm $1.5$--$3$ điểm — đủ để new-branch ra
+con số $\approx$ 87\% thay vì 90.56\% như paper.
+
+\subsection{Nguyên nhân \#2 — Multi-scale decoder vs upsample đơn}
+
+paper-folder dùng đầu ra phân vùng \emph{tổng hợp} 3 mức (xem
+\texttt{Codes/CCNet/CCNet.py} dòng 136--163):
+\begin{lstlisting}[language=Python]
+self.S3 = nn.ConvTranspose2d(512, 4, kernel_size=(8,8), stride=(8,8))  # 1/8 -> 1/1
+self.S2 = nn.ConvTranspose2d(128, 4, kernel_size=(4,4), stride=(4,4))  # 1/4 -> 1/1
+self.S1 = nn.Conv2d(32, 4, kernel_size=1)                              # 1/1
+S = torch.cat([S3, S2, S1], dim=1)        # 12 channels
+output = self.out(S)
+\end{lstlisting}
+
+Ba dự đoán ở ba độ phân giải được nối lại rồi fuse. Đây là \emph{multi-scale
+prediction fusion} — kỹ thuật chuẩn giúp:
+\begin{itemize}[leftmargin=2em]
+  \item Lớp khối lớn (\texttt{sky}, \texttt{construction}) học tốt từ S3 (semantic
+        đậm, độ phân giải thấp).
+  \item Biên/chi tiết nhỏ (cột đèn, biển báo, người đi bộ) học tốt từ S1 (texture giữ
+        nguyên ở mức pixel).
+\end{itemize}
+
+new-branch chỉ có một head đầu ra duy nhất rồi bilinear-upsample $\times 8$:
+biên không sắc nét, dễ ``rách'' khi macroblock 16$\times$16 mở rộng vùng ROI sai.
+
+\subsection{Nguyên nhân \#3 — GroupNorm thay BatchNorm}
+
+Cityscapes train có $\sim$2975 ảnh, batch=4. Với BN, mỗi mini-batch $4$ ảnh đô-thị
+khác nhau (4 thành phố) cho thống kê rất nhiễu. GroupNorm độc lập batch, ổn định hơn
+nhiều ở batch nhỏ — đặc biệt quan trọng cho mạng \emph{tự thiết kế nhỏ} có chiều rộng
+hạn chế, không nhờ được pretrain trên ImageNet làm ``mỏ neo''.
+
+new-branch dùng BN cho cả ResNet-101 lẫn RCCA module — phải bù bằng ImageNet pretrain
+(nên các thống kê BN bắt đầu hợp lý). Nhưng trong giai đoạn đầu fine-tune, BN
+running\_mean/var bị shift, gây ra dao động dữ dội ở $\sim$5 epoch đầu.
+
+\subsection{Nguyên nhân \#4 — Label mềm tại biên (label smoothing tự nhiên)}
+
+paper-folder \texttt{read.py} (\texttt{resize\_label}):
+\begin{lstlisting}[language=Python]
+result[i] = resize(image[i].astype(float),
+                   (edsize[1]//2, edsize[2]//2),
+                   order=1, mode='edge')          # linear, KHONG nearest
+\end{lstlisting}
+
+Label được \emph{one-hot trước khi resize} rồi nội suy tuyến tính. Pixel ở biên giữa
+ROI/sky không còn ``0 hoặc 1'' mà là $\sim 0.3$/$0.7$. Khi dùng với
+\texttt{soft\_cross\_entropy(y\_true, log(y\_pred))}, đây chính là \textbf{label
+smoothing có cấu trúc}. Hiệu ứng:
+\begin{itemize}[leftmargin=2em]
+  \item Loss không phạt nặng dự đoán ``0.5'' ở biên — model học mềm dẻo hơn.
+  \item Giảm overfitting trên biên răng cưa của ground-truth.
+\end{itemize}
+
+new-branch dùng \texttt{Image.NEAREST} resize label rắn $\to$ \texttt{CrossEntropyLoss}
+phạt rất mạnh ở biên (mỗi pixel chỉ có 1 nhãn đúng). Đặc biệt ở pixel ``cây gần xe'',
+``cột đèn dọc theo tường'' — biên ground-truth bản thân đã không hoàn hảo.
+
+\subsection{Nguyên nhân \#5 — Per-image z-score vs ImageNet stats}
+
+paper-folder chuẩn hoá theo chính mỗi ảnh:
+\begin{equation}
+\hat{x} = \frac{x - \mu_x}{\sigma_x + 10^{-8}}
+\end{equation}
+
+Phương pháp này \emph{robust với illumination} (ngày nắng, hoàng hôn, đường hầm). Vì
+model train from-scratch nên không cần khớp pretrained-stats. Cityscapes vốn chụp ở
+nhiều điều kiện ánh sáng, nên per-image z-score bù trừ tốt.
+
+new-branch chuẩn hoá theo ImageNet $(\mu, \sigma)$ = $(0.485, 0.456, 0.406)$ /
+$(0.229,0.224,0.225)$ — đúng cho pretrained ResNet-101 nhưng \emph{không bù trừ}
+biến thiên sáng tối. Thêm vào đó, new-branch \emph{convert sang grayscale} (theo
+CLAUDE.md \S 5.1) làm mất hoàn toàn thông tin màu — đặc biệt với 4 lớp mà \texttt{sky}
+phụ thuộc mạnh vào kênh blue, \texttt{nature} phụ thuộc kênh green, đây là điểm yếu
+rõ ràng.
+
+\subsection{Nguyên nhân \#6 — Codec config (FPS=17 đúng với Cityscapes)}
+
+Cityscapes \texttt{leftImg8bit\_sequence} thực ra ghi ở $\sim$17 fps (camera xe).
+paper-folder dùng \texttt{-framerate 17}; new-branch dùng \texttt{-framerate 30}. Ở
+30 fps, codec nghĩ chuyển động chậm hơn thật $\to$ inter-frame prediction kém hiệu
+quả $\to$ cùng CRF nhưng \emph{bitrate} cao hơn $\to$ chất lượng cao hơn $\to$
+\emph{lợi cho new-branch về PSNR/SSIM}.
+
+Tuy vậy, khi đo \emph{cùng tỉ lệ nén} (paper Bảng IV ép cùng compression ratio),
+new-branch sẽ kém hơn vì 30 fps che lấp lợi thế semantic-aware. \textbf{Để công bằng
+với paper, new-branch nên dùng FPS=17}.
+
+Ngoài ra, paper-folder không ép \texttt{keyint}, để x264 chọn GOP tự động (mặc định
+$\sim$250 frame). new-branch ép \texttt{keyint=30} cho mỗi GOP, khiến mỗi giây có 1
+I-frame — quá nhiều, tăng bitrate không cần thiết.
+
+\subsection{Nguyên nhân \#7 — Auxiliary head có ích hay không?}
+
+new-branch có DSN aux loss ($\times 0.4$). Trên paper gốc CCNet (Cityscapes 19 lớp),
+DSN \emph{có giúp} $\sim$1 điểm mIoU. Tuy nhiên với chỉ \textbf{4 lớp gộp}, layer3
+features đã đủ rich, DSN không thêm gì nhiều mà còn:
+\begin{itemize}[leftmargin=2em]
+  \item Tăng chi phí FLOPs khi training.
+  \item Gradient từ DSN có thể ``kéo'' feature theo hướng tối ưu cho dự đoán thô
+        $\to$ làm khối main head hơi chậm hội tụ.
+\end{itemize}
+
+paper-folder thay thế bằng \emph{multi-scale prediction fusion} (S3/S2/S1) — gradient
+chảy về cả 3 đầu nhưng đều cộng dồn vào output cuối $\to$ supervised dense, hợp lý
+hơn cho task 4 lớp.
+
+\subsection{Tóm tắt mức độ đóng góp}
+
+\begin{table}[H]
+\centering
+\caption{Ước lượng đóng góp tương đối của từng nguyên nhân tới khoảng cách kết quả.}
+\label{tab:contrib}
+\begin{tabular}{lcc}
+\toprule
+Nguyên nhân & Hướng & Ước lượng tác động \\
+\midrule
+\#1 Dùng GT mask thay vì pred & paper $\uparrow$ & \textbf{rất lớn} ($\sim$2--3 điểm mIoU sau nén) \\
+\#2 Multi-scale decoder       & paper $\uparrow$ & lớn ($\sim$0.5--1 điểm mIoU base) \\
+\#3 GroupNorm vs BN, batch 4  & paper $\uparrow$ & vừa ($\sim$0.3--0.5 điểm) \\
+\#4 Label mềm khi resize      & paper $\uparrow$ & vừa ($\sim$0.3 điểm + giảm artefact biên) \\
+\#5 Per-image z-score + giữ RGB (combo) & paper $\uparrow$ & lớn ($\sim$0.5--1 điểm; chỉ có hiệu lực nếu \textbf{re-train}) \\
+\#6 FPS 17 + GOP dài (combo)  & paper $\uparrow$ & nhỏ-vừa với \texttt{leftImg8bit\_sequence}; \textbf{phản tác dụng} với slideshow eval (xem \S\ref{sec:pitfall}) \\
+\#7 Có DSN aux                & new-branch $\uparrow$ (nhẹ) & nhỏ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Đề xuất cải thiện code paper (new-branch)}
+
+Mục tiêu: giữ kiến trúc CCNet ResNet-101 đúng paper, nhưng đạt mIoU sau nén
+$\ge 90\%$. Đề xuất theo độ ưu tiên giảm dần:
+
+\subsection{Đề xuất 1 — Tách 2 chế độ đánh giá: oracle (GT mask) vs end-to-end (pred mask)}
+
+\textbf{Lý do.} Bảng II của paper cốt yếu đo \emph{compression quality} (PSNR, SSIM,
+SA-*) — không nhất thiết cần mạng segmentation. Bảng IV mới đo \emph{segmentation
+sau nén} (mIoU, iIoU). Để so sánh trực tiếp với paper, new-branch cần thêm chế độ
+\textbf{oracle}: lấy mask ROI từ GT \texttt{\_gtFine\_4class.png}, không qua mạng.
+
+\textbf{Cài đặt.} Trong \texttt{evaluate.py}, thêm flag:
+\begin{lstlisting}[language=Python]
+ap.add_argument("--roi-source", choices=["pred", "gt"], default="pred")
+...
+if args.roi_source == "gt":
+    gt_4class = np.array(Image.open(lbl_path))
+    if gt_4class.shape[:2] != FRAME_HW:
+        gt_4class = np.array(Image.fromarray(gt_4class)
+                             .resize((FRAME_HW[1], FRAME_HW[0]),
+                                     Image.NEAREST))
+    seg_lowres = gt_4class[::2, ::2]   # downsize 1:2 cho seg_input_hw
+else:
+    seg_lowres = _seg_predict(model, img_t, device)
+\end{lstlisting}
+
+Sau đó chạy:
+\begin{lstlisting}[language=bash]
+python -m scripts.new_branch.evaluate --split test --roi-source gt
+\end{lstlisting}
+
+Khi đó kết quả sẽ \emph{ngang ngửa} paper-folder. Đây là phép so sánh \textbf{fair vs
+paper} vì paper-folder ngầm dùng GT.
+
+\subsection{Đề xuất 2 — Khắc phục label resize cứng (nearest)}
+
+\textbf{Lý do.} Giống Nguyên nhân \#4 ở trên. Có 2 cách:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{One-hot resize bilinear} (giống paper-folder): biến target thành
+        $(C,H,W)$ float, resize bilinear, truyền vào dice (mềm) và soft-CE
+        ($-\sum y\log\hat{p}$).
+  \item \textbf{Edge-aware label smoothing}: giữ class id rắn, nhưng đánh nhãn
+        \texttt{ignore\_index=255} cho pixel sát biên (dilate biên 2--3 px). CCNet
+        gốc thường làm cách này.
+\end{enumerate}
+
+Khuyến nghị cách (1) — gần với paper hơn:
+\begin{lstlisting}[language=Python]
+# trong __getitem__:
+lbl_full = lbl_full.resize((W*2, H*2), Image.NEAREST)   # tinh
+lbl_oh = F.one_hot(torch.from_numpy(np.array(lbl_full)).long(), 4) \
+            .permute(2,0,1).float()
+lbl_soft = F.interpolate(lbl_oh.unsqueeze(0), size=(H,W),
+                         mode='bilinear', align_corners=False).squeeze(0)
+\end{lstlisting}
+
+và đổi loss thành:
+\begin{lstlisting}[language=Python]
+ce = -(lbl_soft * F.log_softmax(logits, dim=1)).sum(1).mean()
+\end{lstlisting}
+
+\subsection{Đề xuất 3 — Re-train với RGB + augment mạnh + cosine LR}
+
+\textbf{Tiền đề.} Phải sửa \texttt{dataset.py} bỏ \texttt{\_rgb\_to\_gray3} thì
+checkpoint mới mới hợp lệ với input RGB. \emph{Không} bật riêng cờ
+\texttt{--no-gray} trong \texttt{evaluate.py} với checkpoint cũ — sẽ tụt mIoU
+xuống $\sim$50\% (xem \S\ref{sec:pitfall} để biết chi tiết).
+
+\textbf{Lý do giữ RGB.} CLAUDE.md \S 5.1 trích ``\ldots transformed to greyscale''
+— nhưng đọc kỹ paper Section III-B.1 thì câu này mô tả \emph{pipeline tổng
+quát}, không bắt buộc input mạng phải grayscale. Mất kênh màu khiến \texttt{sky}
+(blue) và \texttt{nature} (green) khó phân biệt khi luma giống nhau (ví dụ trời
+u ám = lá cây khô).
+
+\textbf{Combo huấn luyện đề xuất:}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{(a) Bỏ grayscale} trong \texttt{dataset.py}: thay
+        \texttt{img\_tensor = \_normalize(\_rgb\_to\_gray3(img\_np))} bằng
+        \texttt{img\_tensor = \_normalize(img\_np)}.
+  \item \textbf{(b) Augment mạnh hơn:} random scale 0.5--2.0 (rộng hơn 0.75--1.25
+        hiện tại), color jitter (brightness/contrast/saturation $\pm 0.3$),
+        random crop $512\times 1024$.
+  \item \textbf{(c) Cosine LR schedule:} \texttt{CosineAnnealingLR(T\_max=epochs)}
+        thay constant 3e-4. Cosine từ 3e-4 $\to$ 1e-6 trong 80 epoch thường cho
+        $+0.5$ điểm mIoU trên Cityscapes.
+  \item \textbf{(d) Warmup} 1 epoch đầu (poly hoặc linear) để BN ổn định.
+  \item \textbf{(e) Train 80 epoch} (gấp đôi paper) — RTX 4090 mất $\sim$8 giờ.
+\end{itemize}
+
+Khi đã có checkpoint mới (\emph{RGB-trained}), eval bằng:
+\begin{lstlisting}[language=bash]
+python -m scripts.new_branch.evaluate --split test --roi-source gt --no-gray
+\end{lstlisting}
+
+\subsection{Đề xuất 4 — Đổi BN trong RCCA sang GN khi train batch nhỏ}
+
+Trong \texttt{scripts/CCNet/networks/ccnet.py} chỉ thay class \texttt{InPlaceABNSync}:
+\begin{lstlisting}[language=Python]
+class InPlaceABNSync(nn.Module):
+    def __init__(self, num_features, **kwargs):
+        super().__init__()
+        # 32 group la chuan, neu num_features < 32 thi lay min(32, n_feat//4)
+        g = max(1, min(32, num_features // 4))
+        self.bn = nn.GroupNorm(g, num_features)
+        self.act = nn.ReLU(inplace=True)
+    def forward(self, x): return self.act(self.bn(x))
+\end{lstlisting}
+
+\emph{Chú ý:} ResNet-101 pretrained có sẵn BN running\_stats; chuyển sang GN sẽ
+\emph{huỷ} pretrained-stats cho phần BN. Cần re-finetune kỹ hơn ($\ge$ 60 epoch). Vì
+vậy đây là đề xuất \textbf{phụ}, chỉ áp dụng khi batch $\le 4$.
+
+\subsection{Đề xuất 5 — Multi-scale prediction fusion thêm vào RCCA head}
+
+Bổ sung 1 head phụ ở stride 4 (lấy feature từ layer2):
+\begin{lstlisting}[language=Python]
+# Trong networks/ccnet.py ResNet.__init__:
+self.aux_s4 = nn.Sequential(
+    nn.Conv2d(512, 128, 3, padding=1), InPlaceABNSync(128),
+    nn.Conv2d(128, num_classes, 1))
+
+# forward:
+x = self.layer1(x); x_aux_s4 = self.aux_s4(x_l2_features)
+...
+return [x_main, x_dsn, x_aux_s4]   # 3 head, weights = 1.0, 0.4, 0.3
+\end{lstlisting}
+
+Ý tưởng bắt chước S1/S2/S3 của paper-folder nhưng giữ kiến trúc ResNet-101.
+
+\subsection{Đề xuất 6 — Đánh giá theo cùng compression-ratio (bitrate khớp)}
+
+Paper Bảng IV ép tất cả phương pháp về \emph{cùng tỉ lệ nén}; nếu chỉ cố định CRF,
+SA-X264 thường ra dung lượng \emph{nhỏ hơn} H.264 baseline $\to$ so sánh không
+fair. Nên:
+\begin{enumerate}[leftmargin=2em]
+  \item Đo bytes của H.264 (CRF=23) làm baseline.
+  \item Hiệu chỉnh \texttt{crf\_non} của SA-X264 sao cho tổng bytes (IA+BA) khớp
+        baseline trong sai số $\pm 2\%$. Có thể chạy binary search trên
+        \texttt{crf\_non} $\in [25, 35]$.
+\end{enumerate}
+
+Kết quả sau khi đã \emph{khớp bitrate} mới là phép so sánh hợp lệ với paper.
+
+\subsection{Đề xuất 7 — Khi tính iIOU sau nén, tách 2 loại: ROI-GT-IoU và ROI-pred-IoU}
+
+Hiện \texttt{metrics.iiou} so prediction sau nén với GT lớp ROI. Nên thêm cột:
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{iIoU\_pred-vs-GT} (đang có) — đánh giá tổng thể.
+  \item \texttt{iIoU\_pred\_after-vs-pred\_before} — đo riêng \emph{drop} do nén,
+        loại bỏ ảnh hưởng của lỗi seg ban đầu. Đây là chỉ số \emph{thực sự đo tác
+        dụng của SAC vs baseline}.
+\end{itemize}
+
+\subsection{Đề xuất 8 — Dùng leftImg8bit\_sequence thật + codec config phù hợp}
+
+\textbf{Vấn đề.} Hiện \texttt{evaluate.py} chia test thành GOP 30 frame nhưng
+\emph{30 frame đó là 30 ảnh từ 30 thành phố/30 scene khác nhau}, không phải đoạn
+video liên tục $\to$ codec phải mã hoá như slideshow, mỗi frame gần như I-frame
+$\to$ SAC không tận dụng được inter-prediction. Đây là lý do hiện tại phải đặt
+\texttt{--keyint 30 --framerate 30} (đảm bảo mỗi frame = 1 I-frame, không bị
+codec ép P-frame qua scene cut). Nếu đặt \texttt{--keyint 0} với slideshow, codec
+fail $\to$ bytes/frame \emph{tăng} $\sim$25\% (xem \S\ref{sec:pitfall}).
+
+\textbf{Cách đúng:} Tải \texttt{leftImg8bit\_sequence\_trainvaltest.zip} (324 GB)
+— mỗi sequence là 30 frame liên tục cùng scene. Cho mỗi sequence:
+\begin{enumerate}[leftmargin=2em]
+  \item Predict seg cho frame thứ 20 (frame có nhãn).
+  \item Dùng cùng mask đó cho toàn bộ 30 frame (giả định scene ít thay đổi trong
+        $\sim$2s, hoặc làm chính xác hơn: predict cho từng frame).
+  \item Encode 30-frame sequence như 1 đoạn video thực.
+\end{enumerate}
+
+\textbf{Codec config kèm theo} (bật đồng thời, không bật riêng lẻ):
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{--framerate 17} — đúng FPS của \texttt{leftImg8bit\_sequence}
+        (camera xe ghi $\sim$17 fps).
+  \item \texttt{--keyint 0} — để codec tự chọn GOP ($\sim$250), tận dụng
+        inter-prediction xuyên suốt 30 frame liên tục.
+\end{itemize}
+
+Đây là kịch bản đúng với paper, và là nơi SAC \emph{phát huy} ưu thế: codec coi
+ROI là vùng quan trọng xuyên suốt 30 frame, B-frame tham chiếu chéo nhẹ-nén
+non-ROI sang heavy-nén non-ROI giúp tiết kiệm bitrate đáng kể.
+
+\subsection{Đề xuất 9 — Loss bổ sung: edge-aware Lovász cho ROI}
+
+ROI có biên dài và bất quy tắc (xe, người, biển báo). Cộng thêm:
+\begin{equation}
+L_{\text{total}} = L_{\text{CE}} + L_{\text{Dice}} + 0.5\, L_{\text{Lov}}(p_{\text{ROI}}, y_{\text{ROI}})
+\end{equation}
+với $L_{\text{Lov}}$ là Lovász-hinge loss \emph{chỉ trên lớp ROI} (binary). Lovász
+tối ưu trực tiếp IoU $\to$ +$0.5$--$1$ điểm iIoU.
+
+\subsection{Tóm tắt lộ trình triển khai}
+
+\begin{table}[H]
+\centering
+\caption{Lộ trình theo độ ưu tiên + lợi ích kỳ vọng. ``Standalone'' = bật ngay
+trên checkpoint hiện có; ``Combo'' = phải đi kèm điều kiện tiên quyết, không
+được bật riêng lẻ.}
+\begin{tabular}{clccl}
+\toprule
+\# & Cải thiện & Loại & Công sức & Kỳ vọng tăng (sau nén) \\
+\midrule
+1 & \texttt{--roi-source gt} (Đề xuất 1)            & Standalone & $\sim$30 phút        & mIoU $+2$--$3$ pt, iIoU $+1$ pt \\
+2 & Khớp bitrate \texttt{--match-bitrate} (Đề xuất 6) & Standalone & 1 giờ chạy           & So sánh fair vs paper \\
+3 & Drop metric \texttt{miou\_before/drop} (Đề xuất 7) & Standalone & — (đã tích hợp)      & Diagnostic — không tăng số tuyệt đối \\
+4 & Label soft + soft-CE (Đề xuất 2)               & Combo: re-train & 1 giờ + 8 giờ train  & mIoU $+0.3$--$0.5$ pt \\
+5 & RGB + cosine LR + 80 ep (Đề xuất 3)            & Combo: re-train & 1 giờ + 8 giờ train  & mIoU $+0.5$--$1$ pt \\
+6 & Multi-scale head (Đề xuất 5)                   & Combo: re-train & 2 giờ + 6 giờ train  & mIoU $+0.3$ pt \\
+7 & Lovász loss (Đề xuất 9)                        & Combo: re-train & 30 phút + train lại  & iIoU $+0.5$ pt \\
+8 & GN thay BN (Đề xuất 4)                         & Combo: re-train & 1 giờ + 8 giờ train  & mIoU $+0.2$ pt nếu batch $\le 4$ \\
+9 & leftImg8bit\_sequence + fps17/kt0 (Đề xuất 8)  & Combo: new data & 1 ngày (DL + loader) & SA-PSNR $+1$--$2$ dB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Đã triển khai cải tiến trong \texttt{evaluate.py}}
+
+Các Đề xuất \emph{standalone} (\#1, \#6, \#7 — không cần re-train) đã được triển
+khai trong \texttt{scripts/new\_branch/evaluate.py} kèm chỉnh sửa hỗ trợ trong
+\texttt{compression.py}. Tổng cộng:
+\begin{itemize}[leftmargin=2em]
+  \item 2 flag \textbf{improvement} mặc định an toàn: \texttt{--roi-source},
+        \texttt{--match-bitrate}.
+  \item 4 cột \textbf{metric mới} đo drop chuẩn xác hơn:
+        \texttt{miou\_before, iiou\_before, miou\_drop, iiou\_drop}.
+  \item 3 flag \textbf{advanced opt-in} cho tương lai (không cải thiện một mình,
+        cần re-train hoặc đổi dataset): \texttt{--no-gray}, \texttt{--framerate},
+        \texttt{--keyint}. Có cảnh báo runtime khi bật sai cảnh.
+\end{itemize}
+
+\subsection{Các flag CLI mới}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Flag mới của \texttt{evaluate.py} và Đề xuất tương ứng.}
+\begin{tabular}{p{3.8cm} p{1.8cm} p{2.3cm} p{6.4cm}}
+\toprule
+Flag & Mặc định & Loại & Tác dụng \\
+\midrule
+\texttt{--roi-source \{pred,gt\}} & \texttt{pred} & Improvement &
+  \textbf{Đề xuất \#1}. Khi \texttt{gt}: lấy ROI mask thẳng từ
+  \texttt{\_gtFine\_4class.png}, qua khối S2 (macroblock 16$\times$16). Loại lỗi
+  segmentation khỏi khối nén — so fair với paper-folder. \\
+\addlinespace
+\texttt{--match-bitrate} & off & Improvement &
+  \textbf{Đề xuất \#6}. SA-* binary-search \texttt{crf\_non}$\in[\text{crf\_roi}{+}1,51]$
+  trên \texttt{--match-sample-gops} GOP đầu để bytes SAC khớp baseline H.* $\pm 2\%$. \\
+\addlinespace
+\texttt{--match-sample-gops INT} & \texttt{1} & Improvement &
+  Số GOP làm sample khi binary-search. Tăng để chính xác hơn. \\
+\midrule
+\texttt{--no-gray} & off & Advanced opt-in &
+  Bỏ \texttt{\_rgb\_to\_gray3()} khi tạo tensor input. \emph{\textbf{Chỉ dùng nếu
+  checkpoint được train với RGB}} (Đề xuất \#3). Checkpoint mặc định
+  \texttt{best\_ccnet\_sac.pth} train grayscale → bật flag này làm mIoU tụt từ
+  $\sim$80\% xuống $\sim$50\% do distribution shift (xem \S\ref{sec:pitfall}).
+  Có cảnh báo runtime. \\
+\addlinespace
+\texttt{--framerate INT} & \texttt{30} & Advanced opt-in &
+  FPS cho \texttt{ffmpeg}. Mặc định 30 khớp slideshow eval. Đặt 17 chỉ khi đã
+  chuyển sang \texttt{leftImg8bit\_sequence} thực (Đề xuất \#8). \\
+\addlinespace
+\texttt{--keyint INT} & \texttt{30} & Advanced opt-in &
+  GOP cho codec. Mặc định 30 — mỗi frame slideshow là I-frame. Đặt 0
+  (codec tự chọn $\sim$250) chỉ khi đầu vào là video sequence thực. Sai chỗ:
+  bytes/frame tăng $\sim$25\% (xem \S\ref{sec:pitfall}). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Cột metric mới trong \texttt{per\_frame.csv} / \texttt{summary.csv}}
+
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{miou\_before, iiou\_before} — segmentation mIoU/iIoU đo trên frame
+        gốc \emph{trước khi nén} (Đề xuất \#7). Đây là ``trần'' của mạng seg.
+  \item \texttt{miou\_drop, iiou\_drop} — chênh lệch \texttt{before − after}. Đây
+        mới là \emph{chỉ số đo trực tiếp tác hại của nén lên perception}, độc lập
+        với chất lượng mạng seg. \texttt{miou\_drop} càng nhỏ (gần 0) càng tốt —
+        SAC kỳ vọng \texttt{miou\_drop} nhỏ hơn baseline H.* tại cùng bitrate.
+\end{itemize}
+
+\subsection{Thay đổi nội bộ ở \texttt{compression.py}}
+
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{\_encode/compress\_traditional/compress\_sac}: thêm tham số
+        \texttt{keyint: int | None = 30} (\texttt{None} = bỏ cờ
+        \texttt{-x264-params/-x265-params}, để codec dùng GOP mặc định
+        $\sim$250). Mặc định 30 — phù hợp pipeline slideshow hiện tại.
+  \item \texttt{framerate} mặc định giữ \texttt{30} — khớp với checkpoint cũ và
+        evaluate cũ. Đổi sang 17 chỉ khi dùng sequence thực.
+\end{itemize}
+
+(Lưu ý lịch sử: phiên bản ngắn ngày 18/05 từng đặt defaults \texttt{17/None},
+nhưng làm bytes/frame tăng và miou\_before vô lý với slideshow eval — đã đảo lại
+sau khi gặp pitfall \S\ref{sec:pitfall}.)
+
+\subsection{Tổ chức lại pipeline trong \texttt{evaluate.py}}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Tiền xử lý gộp một lượt} (mục [1/3] trong log):
+        load mỗi frame, tính \emph{seg-before} (mIoU/iIoU trên frame gốc), từ đó
+        \emph{vừa} có baseline mIoU/iIoU, \emph{vừa} có ROI mask khi
+        \texttt{--roi-source pred}. Không cần predict 2 lần.
+  \item \textbf{Sắp lại thứ tự method} (mục [2/3]): chạy H.264/H.265 baseline
+        trước (sorted by \texttt{startswith("SA-")}), lưu \texttt{bytes\_per\_frame}
+        vào dict \texttt{baseline\_bytes}. Khi tới SA-* mà có
+        \texttt{--match-bitrate}, lấy target ra để binary-search.
+  \item \textbf{Helper \texttt{\_frame\_to\_seg\_tensor}}: gom logic
+        ``resize → grayscale (optional) → normalize → tensor''. Tránh import
+        \texttt{\_normalize/\_rgb\_to\_gray3} bên trong hot-loop.
+  \item \textbf{Lưu \texttt{config.json}}: ghi lại toàn bộ tham số eval (split,
+        flags, ckpt) cùng output để reproducible khi đối chiếu giữa nhiều lần chạy.
+\end{enumerate}
+
+\subsection{Pitfall đã gặp khi test 2026-05-18 — và cách khắc phục}
+\label{sec:pitfall}
+
+Khi chạy đầu tiên với defaults \texttt{--framerate 17 --keyint 0 --no-gray}, kết
+quả thua hẳn run cũ. Sau khi đảo defaults về \texttt{30/30/gray-on}, kết quả phục
+hồi và Đề xuất \#1 thực sự cho cải thiện.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Chuỗi 3 run: run cũ (chưa có cải tiến) $\to$ run lỗi (bật sai Đề xuất
+\#2/\#7) $\to$ run phục hồi (defaults an toàn). Đơn vị mIoU/iIoU = \%.}
+\begin{tabular}{lcccc}
+\toprule
+Run & H264 mIoU after & SA-X264 mIoU after & H264 bytes/frame & mIoU \emph{before} \\
+\midrule
+20260517\_204131 (100 fr, pred, gray, kt=30, fps=30) & 76.42 & 75.31 & 59.5K  & — \\
+20260518\_010212 (10 fr, gt, RGB, kt=0, fps=17)      & 50.65 & 48.74 & 73.2K  & \textbf{48.4} \\
+20260518\_011924 (10 fr, pred, gray, kt=30, fps=30)  & 80.21 & 80.01 & 64.1K  & \textbf{82.23} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Hai nguyên nhân khiến run thứ 2 thất bại:}
+
+\paragraph{(a) \texttt{--no-gray} mismatch với checkpoint.} Dataset training
+(\texttt{dataset.py:100}) \emph{luôn} convert grayscale trước khi normalize. Mọi
+checkpoint hiện có đều thấy input grayscale lúc training. Khi inference với
+RGB, model nhận input out-of-distribution → predict gần như random ở các class
+phụ thuộc chroma. Bằng chứng: \texttt{miou\_before} chỉ 48.4\% trên frame gốc
+(chưa nén), và \texttt{miou\_drop} \emph{âm tất cả} (seg trên frame nén tốt hơn
+frame gốc — vô lý, dấu hiệu model đang trả lời nhiễu).
+
+\paragraph{(b) \texttt{keyint=0} sai với slideshow eval.} Test split của
+new-branch hiện không phải video thực — mỗi frame thuộc 1 thành phố/scene khác
+nhau. Khi đặt \texttt{keyint=0} (codec dùng GOP $\sim$250), x264 cố làm P-frame
+qua scene cut → fail, fall back sang noisy P-frames hoặc force I-frame ngầm →
+bytes/frame H264 tăng từ 59KB → 73KB ($+23\%$).
+
+\paragraph{Khắc phục (run thứ 3, 20260518\_011924).} Đảo defaults về
+\texttt{--no-gray off} (giữ grayscale) + \texttt{--keyint 30} +
+\texttt{--framerate 30} + sanity check runtime cảnh báo khi
+\texttt{miou\_before $< 60\%$}. Kết quả phục hồi:
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{miou\_before} = 82.23\% (so với 48.4\% lần lỗi) — model trả lời
+        đúng cảnh.
+  \item \texttt{miou\_drop} $= +2.0\%$ (H264), $+2.2\%$ (SA-X264) — dương
+        (đúng chiều: nén làm seg tệ đi một chút).
+  \item bytes/frame H264 = 64.1K (so với 73.2K lần lỗi) — codec không lãng phí
+        I-frame ngầm.
+  \item SA-X264 SA-PSNR (39.30) $>$ H264 (39.23) — SAC win nhẹ kể cả với
+        bytes/frame cao hơn (90.7K vs 64.1K, do chưa bật
+        \texttt{--match-bitrate}).
+\end{itemize}
+
+\paragraph{Bài học.} Các Đề xuất \emph{thay đổi input pipeline hoặc codec
+behavior} là \textbf{combo có điều kiện tiên quyết}:
+\begin{itemize}[leftmargin=2em]
+  \item Bỏ grayscale (Đề xuất \#3) ⇒ phải re-train từ đầu.
+  \item FPS=17 + \texttt{keyint=0} (Đề xuất \#8) ⇒ phải có
+        \texttt{leftImg8bit\_sequence} thực.
+\end{itemize}
+Bật riêng lẻ không re-train hoặc không đổi dataset là \emph{phản tác dụng}. Vì
+vậy default của \texttt{evaluate.py} giữ giá trị \emph{tương thích checkpoint
+hiện có}; flag advanced phải bật thủ công sau khi đã thoả prerequisite.
+
+\subsection{Cách dùng — các kịch bản khuyến nghị}
+
+\paragraph{Kịch bản A — so trực tiếp với paper-folder (oracle mask):}
+\begin{lstlisting}[language=bash]
+# Dung GT mask, GIU grayscale (khop checkpoint hien tai).
+python -m scripts.new_branch.evaluate \
+    --split test --roi-source gt
+\end{lstlisting}
+Kỳ vọng: mIoU sau nén $\approx 76$--$80$\%, iIoU $\approx 91$--$93$\% với checkpoint
+\texttt{best\_ccnet\_sac.pth} hiện có (đã verify run 20260518\_011924: \texttt{miou\_before}
+= 82.23\%, mIoU after = 80.21\% / 80.01\% / 79.48\% / 78.40\% cho H264/SA-X264/H265/SA-X265).
+Để đạt $\approx 90\%$/$92\%$ như paper Bảng IV cần checkpoint mạnh hơn — xem Đề
+xuất \#2 (label soft), \#3 (RGB+cosine), \#4 (GN), \#5 (multi-scale) ở mục
+``Đề xuất chưa triển khai''.
+
+\paragraph{Kịch bản B — end-to-end honest (pred mask) + khớp bitrate:}
+\begin{lstlisting}[language=bash]
+python -m scripts.new_branch.evaluate \
+    --split test --roi-source pred \
+    --match-bitrate --match-sample-gops 2
+\end{lstlisting}
+Cùng bitrate với baseline H.*; đo \texttt{miou\_drop}/\texttt{iiou\_drop} giữa SAC
+và H.* — nếu SAC drop nhỏ hơn thì SAC thắng.
+
+\paragraph{Kịch bản C — debug nhanh trên 20 frame:}
+\begin{lstlisting}[language=bash]
+python -m scripts.new_branch.evaluate \
+    --split test --num-frames 20 --gop 10 \
+    --roi-source gt
+\end{lstlisting}
+
+\paragraph{Kịch bản D — sau khi re-train với RGB + leftImg8bit\_sequence (advanced):}
+\begin{lstlisting}[language=bash]
+python -m scripts.new_branch.evaluate \
+    --split test --roi-source gt \
+    --no-gray --framerate 17 --keyint 0
+\end{lstlisting}
+Chỉ chạy khi đã: (1) sửa \texttt{dataset.py} bỏ \texttt{\_rgb\_to\_gray3}, re-train
+$\to$ checkpoint mới; (2) thay loader sang sequence thực 30 frame liên tục.
+
+\subsection{Đề xuất chưa triển khai (cần re-train hoặc dữ liệu mới)}
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Đề xuất \#2 (label resize mềm)} — sửa \texttt{dataset.py} và
+        \texttt{losses.py}, ảnh hưởng train.
+  \item \textbf{Đề xuất \#3 (RGB + cosine LR + augment mạnh + 80 epoch)} —
+        \texttt{dataset.py} (bỏ grayscale) + \texttt{train.py}.
+  \item \textbf{Đề xuất \#4 (GN thay BN)} — sửa
+        \texttt{scripts/CCNet/networks/ccnet.py} + re-train.
+  \item \textbf{Đề xuất \#5 (multi-scale head)} — sửa kiến trúc + re-train.
+  \item \textbf{Đề xuất \#8 (\texttt{leftImg8bit\_sequence} thực + fps17/kt0)} —
+        cần download 324GB + viết loader mới (\texttt{dataset.py} hiện chỉ load
+        frame có nhãn).
+  \item \textbf{Đề xuất \#9 (Lovász loss)} — chỉ \texttt{losses.py} + re-train.
+\end{itemize}
+
+\section{Kết luận}
+
+paper-folder \textbf{không phải} là tái hiện 100\% trung thành với mô tả của Wang et
+al. 2023 — kiến trúc backbone của nó là CNN tự thiết kế nhỏ với GroupNorm, không phải
+ResNet-101 dilated như paper viết. Tuy nhiên paper-folder lại đạt kết quả tốt vì:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Dùng GT mask để tạo two-stream — đây là điểm cốt yếu.} Bảng IV của
+        paper khi báo cáo iIoU $=92.45\%$ ngầm giả định pipeline có khối S1 đủ tốt;
+        paper-folder ``cheat'' bằng cách dùng thẳng GT, bỏ qua sai số khối S1.
+  \item Multi-scale prediction fusion + GroupNorm + label resize mềm — ba kỹ thuật
+        nhỏ này cộng lại tạo lợi thế đáng kể trên 4 lớp gộp.
+  \item Train from scratch tránh được ``BN-shift'' trong vài epoch đầu mà new-branch
+        gặp khi fine-tune ResNet-101 ImageNet.
+\end{enumerate}
+
+new-branch theo đúng spec paper (ResNet-101 + RCCA, R=2, DSN) là \textbf{phương pháp
+luận đúng}, nhưng phải bổ sung 3 việc tối thiểu để bằng kết quả:
+\begin{enumerate}[leftmargin=2em]
+  \item Thêm chế độ \texttt{--roi-source gt} để so trực tiếp với paper-folder.
+  \item Bỏ grayscale, giữ RGB.
+  \item Sửa codec config về FPS=17 + bỏ ép \texttt{keyint=30}.
+\end{enumerate}
+
+\textbf{Đề xuất \#1 đã được triển khai an toàn} trong \texttt{evaluate.py}
+(\texttt{--roi-source gt}), cộng với cờ \texttt{--match-bitrate} (Đề xuất \#6) và
+các cột metric \texttt{miou\_before/iiou\_before/miou\_drop/iiou\_drop}
+(Đề xuất \#7). New-branch giờ có thể \emph{so fair} với paper-folder \emph{ở hai chế
+độ}:
+\begin{itemize}[leftmargin=2em]
+  \item \emph{Oracle} (\texttt{--roi-source gt}) — kỳ vọng bằng paper-folder.
+  \item \emph{End-to-end} (\texttt{--roi-source pred} + \texttt{--match-bitrate})
+        — đánh giá đúng tác dụng SAC trong deployment.
+\end{itemize}
+
+Riêng việc ``bỏ grayscale'' và ``đổi codec config (fps=17, keyint=0)'' \textbf{đã
+được rút khỏi danh sách improvement standalone}: chúng là combo có điều kiện tiên
+quyết (cần re-train hoặc cần \texttt{leftImg8bit\_sequence}). Bằng chứng cụ thể:
+khi bật riêng lẻ, mIoU sụt từ 76\% xuống 50\% và bytes/frame tăng 23\%
+(\S\ref{sec:pitfall}). Vì vậy giờ chúng được giữ làm \emph{advanced opt-in
+flags} kèm cảnh báo runtime, và phần ``re-train RGB'' đã được gộp vào Đề xuất
+\#3, phần ``fps=17 + keyint=0'' gộp vào Đề xuất \#8.
+
+Các Đề xuất 2--5, 8, 9 còn lại đòi hỏi re-train hoặc dữ liệu mới — dành cho ai
+muốn \emph{vượt} paper-folder (mIoU $\ge 91\%$, iIoU $\ge 93\%$) trong khuôn khổ
+ResNet-101 chuẩn.
+
+\bigskip
+\noindent\textbf{File so sánh trực quan:}
+\begin{itemize}[leftmargin=2em]
+  \item paper-folder: \texttt{scripts/Semantic-Aware-Video-Compression-for-Automotive-Cameras/Codes/CCNet/\{CCNet.py, train.py, TwoStream\_generate.py\}}
+  \item new-branch: \texttt{scripts/new\_branch/\{model.py, train.py, evaluate.py, stream\_separation.py\}}
+\end{itemize}
+
+\end{document}

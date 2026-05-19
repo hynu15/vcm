@@ -114,7 +114,7 @@ def load_model(model_path: str, device: torch.device):
         if not os.path.isfile(legacy):
             raise FileNotFoundError(f"Model not found: {resolved} or {legacy}")
         resolved = legacy
-    model, model_name = load_segmentation_model(resolved, device=device, num_classes=4)
+    model, model_name = load_segmentation_model(resolved, device=device, num_classes=2)
     print(f"Using segmentation model: {model_name} | {resolved}")
     return model
 

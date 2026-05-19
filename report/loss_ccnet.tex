@@ -1,0 +1,46 @@
+\subsection{Cấu hình hàm loss của CCNet (train.py)}
+\label{sec:loss_ccnet}
+
+Script \texttt{CCNet/train.py} huấn luyện mạng \texttt{SegNetwork} (CCNet 4 lớp) với hai thành phần loss được cộng đơn giản, không trọng số:
+\begin{equation}
+  \mathcal{L} \;=\; \mathcal{L}_{\mathrm{CE}} \;+\; \mathcal{L}_{\mathrm{Dice}}
+  \label{eq:ccnet_loss}
+\end{equation}
+
+\textbf{Soft cross-entropy} (\texttt{metrics.crossentry}) dùng nhãn one-hot:
+\begin{equation}
+  \mathcal{L}_{\mathrm{CE}} = -\frac{1}{N}\sum_{i} y_i \log(\hat{y}_i + \varepsilon),
+  \qquad \varepsilon = 10^{-6}.
+\end{equation}
+
+\textbf{Mean Dice} (\texttt{metrics.DiceMeanLoss1}) tính riêng từng lớp $c \in \{0,\dots,3\}$ rồi lấy trung bình, smoothing $=1$:
+\begin{equation}
+  \mathcal{L}_{\mathrm{Dice}} = 1 - \frac{1}{C}\sum_{c=1}^{C}\frac{2\sum \hat{y}_c y_c + 1}{\sum \hat{y}_c + \sum y_c + 1}.
+\end{equation}
+
+Tối ưu bằng Adam ($lr = 3\!\times\!10^{-4}$, $\beta = (0{,}9,\,0{,}999)$, weight decay $10^{-5}$), batch size $4$, $200$ epoch, mixed-precision FP16 (\texttt{torch.cuda.amp}). IoU được tính song song chỉ để theo dõi, không tham gia gradient.
+
+\subsection{Nén hai luồng bằng ffmpeg (TwoStream\_generate.py + run\_smoke\_pipeline.py)}
+\label{sec:ccnet_encode}
+
+Trước khi encode, \texttt{TwoStream\_generate.py} tách mỗi frame BGR thành hai luồng theo mặt nạ ROI nhị phân $B = \mathbf{1}[\text{seg}=0]$. Mặt nạ được snap về lưới $16\times16$ bằng hàm \texttt{seg\_mask\_im\_macro} (block nào có $\geq 1$ pixel ROI thì cả block thành ROI), rồi nhân Hadamard:
+\begin{equation*}
+  S_{\mathrm{IA}} = M_i \odot X, \qquad S_{\mathrm{BA}} = (1-M_i) \odot X,
+\end{equation*}
+lưu thành chuỗi PNG \texttt{frame\_\%05d.png} trong hai thư mục \texttt{IA/} và \texttt{BA/}.
+
+Hàm \texttt{ffmpeg\_encode} trong \texttt{run\_smoke\_pipeline.py} encode mỗi chuỗi độc lập:
+\begin{center}\small
+\texttt{ffmpeg -framerate 30 -i frame\_\%05d.png -c:v libx265 -crf <CRF> -preset medium -pix\_fmt yuv420p -x265-params keyint=30:min-keyint=30 out.mp4}
+\end{center}
+SA-X264 dùng cặp $(C_{\mathrm{roi}}, C_{\mathrm{non}}) = (18, 27)$, SA-X265 dùng $(23, 32)$; GOP = 30 = framerate đảm bảo so sánh công bằng giữa các phương pháp.
+
+\subsection{Ghép lại frame (combine.py)}
+\label{sec:ccnet_combine}
+
+Sau khi \texttt{ffmpeg\_decode} giải nén hai stream ra PNG, \texttt{combine.py} duyệt từng cặp $(\bar{S}_{\mathrm{IA}}, \bar{S}_{\mathrm{BA}})$ và ghép bằng \emph{saturating add} của OpenCV:
+\begin{equation}
+  \bar{x}_t = \texttt{cv2.add}(\bar{S}_{\mathrm{IA}},\, \bar{S}_{\mathrm{BA}})
+  \label{eq:ccnet_merge}
+\end{equation}
+Phép cộng saturate clamp giá trị tại $255$, hợp lệ vì hai stream gần như không chồng pixel non-zero (zero fill ngoài mask). Cuối cùng chuyển BGR$\to$RGB và lưu bằng \texttt{skimage.io.imsave} ra thư mục \texttt{combined/<split>\_X<codec>\_crf<roi>\_<non>/}.

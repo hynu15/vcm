@@ -71,7 +71,7 @@ def load_model(device):
             raise FileNotFoundError(f"Model not found: {model_path} or {legacy}")
         model_path = legacy
 
-    model, model_name = load_segmentation_model(str(model_path), device=device, num_classes=4)
+    model, model_name = load_segmentation_model(str(model_path), device=device, num_classes=2)
     print(f"Using segmentation model: {model_name} | {model_path}")
     return model
 
@@ -191,7 +191,7 @@ def encode_combo(tmp_frame_dir, combo_dir, crf_roi, crf_non, fps, preset):
     sac_video = combo_dir / "sac_x265.mp4"
     trad_video = combo_dir / "traditional_x265.mp4"
 
-    total_crf = int(round((crf_roi + crf_non) / 2.0))
+    total_crf = (crf_roi + crf_non) // 2
 
     run_ffmpeg(
         [
@@ -357,7 +357,7 @@ def main():
             {
                 "crf_roi": crf_roi,
                 "crf_non": crf_non,
-                "crf_trad": int(round((crf_roi + crf_non) / 2.0)),
+                "crf_trad": (crf_roi + crf_non) // 2,
                 "PSNR_Trad": float(mean_metrics["PSNR_Trad"]),
                 "SSIM_Trad": float(mean_metrics["SSIM_Trad"]),
                 "PSNR_SAC": float(mean_metrics["PSNR_SAC"]),

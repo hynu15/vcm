@@ -16,16 +16,12 @@ from train_segmentation import load_segmentation_model
 def get_qp_delta(class_id):
     """
     Quy định mức độ bù trừ QP theo class.
-    Class 0: ROI (street/cars/people) -> nén ít hơn (QP thấp hơn)
-    Class 1: Sky -> nén mạnh nhất (QP cao hơn)
-    Class 2: Construction -> nén trung bình
-    Class 3: Nature -> nén trung bình/mạnh
+    Class 0: ROI (đường/xe/người) -> nén ít hơn (QP thấp hơn)
+    Class 1: non_ROI (sky/construction/nature) -> nén mạnh hơn (QP cao hơn)
     """
     mapping = {
         0: -4,  # ROI (important)
-        1:  6,  # Sky (unimportant)
-        2:  2,  # Construction (less important)
-        3:  4,  # Nature (less important)
+        1:  5,  # non_ROI (unimportant)
     }
     return mapping.get(class_id, 0)
 
@@ -160,6 +156,6 @@ if __name__ == "__main__":
     if not os.path.exists(model_path):
         model_path = os.path.join(os.path.dirname(__file__), "..", "models", "best_ccnet.pth")
         
-    model, _ = load_segmentation_model(model_path, device=device, num_classes=4)
+    model, _ = load_segmentation_model(model_path, device=device, num_classes=2)
     
     process_single_stream_sac(args.video, args.output, model, device, args.base_qp, args.method)

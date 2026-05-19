@@ -1,0 +1,7 @@
+{
+  "model_name": "pidnet_s",
+  "best_miou": 0.8829114072681703,
+  "best_epoch": 40,
+  "num_epochs": 50,
+  "checkpoint_path": "/workspace/sac_project/models/best_pidnet.pth"
+}

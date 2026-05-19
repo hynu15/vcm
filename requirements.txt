@@ -1,0 +1,8 @@
+# Python deps cho scripts/new_branch/ (SAC paper reproduction)
+# Cài bằng: pip install -r requirements.txt
+# Lưu ý: PyTorch + torchvision tự cài riêng với CUDA wheel phù hợp.
+
+numpy
+pillow
+scikit-image
+opencv-python
