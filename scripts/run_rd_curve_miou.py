@@ -23,7 +23,7 @@ import pandas as pd
 
 HERE_SCRIPT = Path(__file__).resolve()
 PROJECT     = HERE_SCRIPT.parents[1]
-CCNET_DIR   = PROJECT / 'scripts/Semantic-Aware-Video-Compression-for-Automotive-Cameras/Codes/CCNet'
+CCNET_DIR   = PROJECT / 'scripts/SAC/Codes/CCNet'
 OUTPUTS     = PROJECT / 'outputs'
 
 DEFAULT_SWEEP = {

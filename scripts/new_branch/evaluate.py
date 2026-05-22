@@ -58,7 +58,7 @@ from .dataset import CityscapesSAC, _normalize, _rgb_to_gray3
 from .model import build_pidnet_l, build_segnet
 from .paths import (CRF_CONFIGS, EVAL_DIR, FRAME_HW, NUM_CLASSES,
                     PIDNET_L_CHECKPOINT, ROI_CLASS_ID, SAC_CHECKPOINT, SEG_INPUT_HW)
-from .stream_separation import build_roi_mask
+from .stream_separation import build_roi_mask, gop_roi_ratio, select_delta_crf
 
 
 @dataclass
@@ -83,6 +83,8 @@ class FrameRecord:
     miou_drop: float
     iiou_drop: float
     bytes_total: int
+    roi_ratio_gop: float = 0.0  # RA-CRF: tỷ lệ ROI trung bình của GOP chứa frame này
+    delta_crf: int = 0          # RA-CRF: ΔCRF đã dùng (0 nếu không phải adaptive)
 
 
 def _to_full_res(img_lowres: np.ndarray, size_hw: tuple[int, int]) -> np.ndarray:
@@ -334,11 +336,13 @@ def main():
 
     for method in method_order:
         cfg = CRF_CONFIGS[method]
-        codec, crf_r, crf_n = cfg["codec"], cfg["crf_roi"], cfg["crf_non"]
-        is_sac = crf_r != crf_n
+        codec = cfg["codec"]
+        is_adaptive = cfg.get("adaptive", False)
+        crf_r, crf_n = cfg["crf_roi"], cfg["crf_non"]
+        is_sac = is_adaptive or (crf_r != crf_n)
 
-        # Match-bitrate: chỉ áp dụng cho SA-*, cần baseline đã encode trước
-        if is_sac and args.match_bitrate:
+        # Match-bitrate: chỉ áp dụng cho SA-* fixed, không áp dụng cho RA-CRF
+        if is_sac and not is_adaptive and args.match_bitrate:
             if codec not in baseline_bytes:
                 print(f"\n  ⚠ {method}: chưa có baseline {codec}, bỏ qua match-bitrate.")
             else:
@@ -346,7 +350,6 @@ def main():
                 k = min(k, N)
                 sample_frames = originals_full[:k]
                 sample_masks = roi_masks[:k]
-                # Tính target bytes cho sample = baseline bytes/frame × k
                 target = baseline_bytes[codec] * k
                 print(f"\n  [match-bitrate] {method}: tìm crf_non khớp {target:,} bytes "
                       f"({k} frame sample)")
@@ -356,19 +359,48 @@ def main():
                 print(f"  → chọn crf_non = {new_crf_n} (paper config = {crf_n})")
                 crf_n = new_crf_n
 
-        print(f"\n=== {method}: codec={codec}, CRF_roi={crf_r}, CRF_non={crf_n} ===")
+        if is_adaptive:
+            print(f"\n=== {method}: codec={codec}, base_crf={cfg['base_crf']}, "
+                  f"ΔCRF=adaptive (rule: <0.25→5, 0.25-0.43→3, >0.43→2) ===")
+        else:
+            print(f"\n=== {method}: codec={codec}, CRF_roi={crf_r}, CRF_non={crf_n} ===")
 
         recon_all: list[np.ndarray | None] = [None] * N
+        # Việc 3: lưu crf thực tế dùng cho mỗi frame (phục vụ FrameRecord)
+        frame_crf_roi: list[int] = [crf_r or 0] * N
+        frame_crf_non: list[int] = [crf_n or 0] * N
+        frame_roi_ratio: list[float] = [0.0] * N
+        frame_delta_crf: list[int] = [0] * N
         bytes_total = 0
         t0 = time.time()
         for chunk in _gop_chunks(list(range(N)), args.gop):
             frames_chunk = [originals_full[i] for i in chunk]
             if is_sac:
                 masks_chunk = [roi_masks[i] for i in chunk]
+                if is_adaptive:
+                    # Việc 1: tính roi_ratio của GOP
+                    ratio = gop_roi_ratio(masks_chunk)
+                    # Việc 2: chọn ΔCRF
+                    delta = select_delta_crf(ratio)
+                    base = cfg["base_crf"]
+                    gop_crf_r = base - delta
+                    gop_crf_n = base + delta
+                    print(f"  GOP [{chunk[0]:4d}-{chunk[-1]:4d}]: "
+                          f"roi_ratio={ratio:.3f}  ΔCRF={delta}  "
+                          f"crf_roi={gop_crf_r}  crf_non={gop_crf_n}")
+                else:
+                    gop_crf_r, gop_crf_n = crf_r, crf_n
+                    ratio, delta = 0.0, 0
+                # Việc 3: encode GOP với cặp CRF tương ứng
                 recon_chunk, b_r, b_n = compress_sac(
-                    frames_chunk, masks_chunk, codec, crf_r, crf_n,
+                    frames_chunk, masks_chunk, codec, gop_crf_r, gop_crf_n,
                     framerate=args.framerate, keyint=keyint)
                 bytes_total += b_r + b_n
+                for i in chunk:
+                    frame_crf_roi[i] = gop_crf_r
+                    frame_crf_non[i] = gop_crf_n
+                    frame_roi_ratio[i] = ratio
+                    frame_delta_crf[i] = delta
             else:
                 recon_chunk, b = compress_traditional(
                     frames_chunk, codec, crf_r,
@@ -398,7 +430,7 @@ def main():
             s_full = M.ssim(orig, recon)
             P_i, S_i = M.regional_psnr_ssim(orig, recon, mask)
             P_n, S_n = M.regional_psnr_ssim(orig, recon, non_mask)
-            sa_p, sa_s = M.sa_psnr_ssim(crf_r, crf_n, P_i, P_n, S_i, S_n)
+            sa_p, sa_s = M.sa_psnr_ssim(frame_crf_roi[i], frame_crf_non[i], P_i, P_n, S_i, S_n)
 
             # Seg-after trên frame tái tạo
             recon_tensor = _frame_to_seg_tensor(recon, use_gray=use_gray)
@@ -411,7 +443,9 @@ def main():
             iiou_d = iiou_before_list[i] - iiou_a
 
             rec = FrameRecord(
-                method=method, crf_roi=crf_r, crf_non=crf_n, idx=start + i, name=names[i],
+                method=method,
+                crf_roi=frame_crf_roi[i], crf_non=frame_crf_non[i],
+                idx=start + i, name=names[i],
                 psnr_full=p_full, ssim_full=s_full,
                 psnr_roi=P_i, ssim_roi=S_i, psnr_non=P_n, ssim_non=S_n,
                 sa_psnr=sa_p, sa_ssim=sa_s,
@@ -419,6 +453,8 @@ def main():
                 miou_after=miou_a, iiou_after=iiou_a,
                 miou_drop=miou_d, iiou_drop=iiou_d,
                 bytes_total=bytes_total,
+                roi_ratio_gop=frame_roi_ratio[i],
+                delta_crf=frame_delta_crf[i],
             )
             per_frame_w.writerow([getattr(rec, k) for k in FrameRecord.__dataclass_fields__])
             per_frame_f.flush()
@@ -431,8 +467,14 @@ def main():
             accs["miou_drop"].append(miou_d); accs["iiou_drop"].append(iiou_d)
 
         elapsed = time.time() - t0
+        # Crf_roi/crf_non trong summary: với adaptive lấy trung bình thực dùng
+        avg_crf_r = float(np.mean(frame_crf_roi)) if is_adaptive else float(crf_r or 0)
+        avg_crf_n = float(np.mean(frame_crf_non)) if is_adaptive else float(crf_n or 0)
         summary[method] = {
-            "codec": codec, "crf_roi": crf_r, "crf_non": crf_n,
+            "codec": codec,
+            "crf_roi": avg_crf_r, "crf_non": avg_crf_n,
+            "adaptive": is_adaptive,
+            "avg_roi_ratio": float(np.mean(frame_roi_ratio)) if is_adaptive else None,
             "start_idx": int(start), "end_idx": int(end), "num_frames": int(N),
             "bytes_total": int(bytes_total),
             "bytes_per_frame": int(bytes_total / max(N, 1)),
@@ -442,12 +484,13 @@ def main():
             "elapsed_sec": elapsed,
         }
         s = summary[method]
+        ra_info = (f"  avg_roi_ratio={s['avg_roi_ratio']:.3f}" if is_adaptive else "")
         print(f"  → SA-PSNR={s['sa_psnr']:.3f} dB  SA-SSIM={s['sa_ssim']:.4f}  "
               f"mIoU(before/after/Δ)={s['miou_before']*100:.2f}/{s['miou_after']*100:.2f}/"
               f"{s['miou_drop']*100:+.2f}%  "
               f"iIoU(before/after/Δ)={s['iiou_before']*100:.2f}/{s['iiou_after']*100:.2f}/"
               f"{s['iiou_drop']*100:+.2f}%  "
-              f"bytes/frame={s['bytes_per_frame']:,}  ({elapsed:.1f}s)")
+              f"bytes/frame={s['bytes_per_frame']:,}  ({elapsed:.1f}s){ra_info}")
 
     per_frame_f.close()
     with open(summary_path, "w", newline="") as f:

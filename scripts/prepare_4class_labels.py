@@ -13,15 +13,15 @@ DATA_ROOT = os.environ.get('SAC_DATA_ROOT', os.path.join(PROJECT_ROOT, 'data'))
 GT_FINE_ROOT = os.path.join(DATA_ROOT, 'gt_4class', 'gtFine_trainvaltest', 'gtFine')
 GT_LABEL_ROOT = os.path.join(DATA_ROOT, 'gt_4class')
 
-# Mapping Cityscapes labelIds → 4 class SAC
-# Class 0 = ROI     : đường, xe, người — mọi pixel không thuộc 3 class dưới (default)
-# Class 1 = sky     : labelId 23
-# Class 2 = construction: labelId 11–16 (building, wall, fence, guard rail, bridge, tunnel)
-# Class 3 = nature  : labelId 21–22 (vegetation, terrain)
+# Mapping Cityscapes labelIds → 4 class SAC (theo reference paper CCNet)
+# Class 0 = background : mọi pixel không thuộc 3 class dưới (default) → BA stream
+# Class 1 = road       : labelId 7–10 (road, sidewalk, parking, rail track)  → IA stream
+# Class 2 = vehicle    : labelId 26–33 (car, truck, bus, train, motorcycle, bicycle, ...) → IA stream
+# Class 3 = pedestrian : labelId 24–25 (person, rider) → IA stream
 
-SKY_IDS           = [23]
-CONSTRUCTION_IDS  = [11, 12, 13, 14, 15, 16]
-NATURE_IDS        = [21, 22]
+ROAD_IDS        = [7, 8, 9, 10]
+VEHICLE_IDS     = [26, 27, 28, 29, 30, 31, 32, 33]
+PEDESTRIAN_IDS  = [24, 25]
 
 
 def collect_label_files(split):
@@ -42,23 +42,23 @@ def collect_label_files(split):
 
 def convert_to_4class(label_path, save_path):
     label = np.array(Image.open(label_path))
-    mask = np.zeros_like(label, dtype=np.uint8)  # default = 0 (ROI)
-    for sid in SKY_IDS:
-        mask[label == sid] = 1
-    for cid in CONSTRUCTION_IDS:
-        mask[label == cid] = 2
-    for nid in NATURE_IDS:
-        mask[label == nid] = 3
+    mask = np.zeros_like(label, dtype=np.uint8)  # default = 0 (background)
+    for rid in ROAD_IDS:
+        mask[label == rid] = 1
+    for vid in VEHICLE_IDS:
+        mask[label == vid] = 2
+    for pid in PEDESTRIAN_IDS:
+        mask[label == pid] = 3
     Image.fromarray(mask).save(save_path)
 
 
 print("⚠️  Cityscapes test split không có ground truth semantic labels.")
 print("    Chỉ xử lý train và val.\n")
-print("4-class mapping:")
-print("  0 = ROI          (road, vehicle, person, ...)")
-print("  1 = sky          (labelId 23)")
-print("  2 = construction (labelId 11-16: building/wall/fence/guard rail/bridge/tunnel)")
-print("  3 = nature       (labelId 21-22: vegetation/terrain)\n")
+print("4-class mapping (CCNet reference paper):")
+print("  0 = background   (catch-all: sky, construction, nature, ...)")
+print("  1 = road         (labelId 7-10: road, sidewalk, parking, rail track)")
+print("  2 = vehicle      (labelId 26-33: car, truck, bus, motorcycle, bicycle, ...)")
+print("  3 = pedestrian   (labelId 24-25: person, rider)\n")
 
 for split in ("train", "val"):
     print(f"Đang chuẩn bị 4-class label cho {split} set...")

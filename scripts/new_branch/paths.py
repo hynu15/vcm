@@ -41,8 +41,14 @@ FRAME_HW = (1024, 2048)     # độ phân giải gốc Cityscapes
 
 # Cặp CRF của paper Bảng II / Bảng IV
 CRF_CONFIGS = {
-    "H264":     {"codec": "libx264", "crf_roi": 23, "crf_non": 23},
-    "SA-X264":  {"codec": "libx264", "crf_roi": 18, "crf_non": 27},
-    "H265":     {"codec": "libx265", "crf_roi": 28, "crf_non": 28},
-    "SA-X265":  {"codec": "libx265", "crf_roi": 23, "crf_non": 32},
+    "H264":          {"codec": "libx264", "crf_roi": 23, "crf_non": 23},
+    "SA-X264":       {"codec": "libx264", "crf_roi": 18, "crf_non": 27},
+    "H265":          {"codec": "libx265", "crf_roi": 28, "crf_non": 28},
+    "SA-X265":       {"codec": "libx265", "crf_roi": 23, "crf_non": 32},
+    # RA-CRF: crf_roi/crf_non là None — tính adaptive per-GOP trong evaluate.py
+    # base_crf là điểm giữa: crf_roi = base - ΔCRF, crf_non = base + ΔCRF
+    "SA-X264-RACRF": {"codec": "libx264", "crf_roi": None, "crf_non": None,
+                      "adaptive": True, "base_crf": 22},
+    "SA-X265-RACRF": {"codec": "libx265", "crf_roi": None, "crf_non": None,
+                      "adaptive": True, "base_crf": 27},
 }

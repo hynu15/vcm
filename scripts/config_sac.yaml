@@ -1,0 +1,71 @@
+# ================================================================
+#  SAC Single-Stream Pipeline — Config file
+#  Chỉnh sửa tự do, sau đó chạy:
+#
+#    conda run -n sac python3 scripts/run_segmentation_rd_pipeline_single_stream.py \
+#      --config scripts/config_sac.yaml \
+#      -n 30 --cities frankfurt --preset medium
+# ================================================================
+#
+#  Mỗi operating point có 4 tham số:
+#
+#  crf_roi  (bắt buộc)
+#      CRF dùng để encode video SAC (composite).
+#      Thấp hơn → chất lượng SAC cao hơn → nhiều bit hơn.
+#
+#  crf_trad  (bắt buộc)
+#      CRF dùng để encode video Traditional.
+#      Hoàn toàn độc lập với crf_roi và crf_non.
+#      Thấp hơn → chất lượng traditional cao hơn → nhiều bit hơn.
+#
+#  crf_non  (bắt buộc)
+#      Chỉ có tác dụng khi non_roi_blur_sigma = 0 (chế độ pre-compress).
+#      Khi non_roi_blur_sigma > 0 (blur mode): tham số này bị bỏ qua.
+#      Cao hơn → non-ROI bị nén nặng hơn (chất lượng thấp hơn).
+#
+#  non_roi_blur_sigma  (tuỳ chọn)
+#      Sigma của Gaussian blur áp vào vùng non-ROI của operating point này.
+#      Ghi đè tham số --non-roi-blur-sigma trên command line.
+#      Bỏ trống / xoá dòng → dùng giá trị global từ --non-roi-blur-sigma (mặc định 3.0).
+#      = 0.0 → không blur, dùng pre-compress tại crf_non thay thế.
+#      > 0.0 → Gaussian blur với sigma này (crf_non bị bỏ qua).
+#
+#  label  (bắt buộc)
+#      Tên hiển thị trong bảng kết quả và biểu đồ. Đặt tuỳ ý.
+#
+# ----------------------------------------------------------------
+#  Để bitrate SAC ≈ Traditional khi dùng blur sigma=3.0:
+#      crf_roi ≈ crf_trad - 3
+#      (blur tiết kiệm ~28% bit, mỗi bước CRF ≈ ±12%)
+#
+#  Để SAC tiết kiệm bitrate hơn: tăng crf_roi lên (hoặc tăng blur_sigma).
+#  Để SAC dùng nhiều bit hơn:   giảm crf_roi xuống.
+# ================================================================
+
+operating_points:
+
+  - label: "OP1"
+    crf_roi: 13
+    crf_trad: 16
+    crf_non: 19
+    # non_roi_blur_sigma: 3.0   # bỏ comment để ghi đè global cho OP này
+
+  - label: "OP2"
+    crf_roi: 16
+    crf_trad: 19
+    crf_non: 22
+
+  - label: "OP3"
+    crf_roi: 19
+    crf_trad: 22
+    crf_non: 25
+
+  - label: "OP4"
+    crf_roi: 22
+    crf_trad: 25
+    crf_non: 28
+
+  - label: "OP5"
+    crf_roi: 25
+    crf_trad: 28
+    crf_non: 31

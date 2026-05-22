@@ -72,3 +72,29 @@ def build_roi_mask(seg_mask_lowres: np.ndarray, target_hw: tuple[int, int] = FRA
     binary = seg_to_binary_roi(seg_mask_lowres)
     up = upsample_mask(binary, target_hw)
     return macroblock_filter(up, block)
+
+
+# ── RA-CRF helpers (Việc 1 + 2) ──────────────────────────────────────────────
+
+def gop_roi_ratio(masks: list[np.ndarray]) -> float:
+    """Việc 1: tỷ lệ pixel ROI trung bình trên một GOP.
+
+    Mỗi mask là uint8 (H,W) ∈ {0,1}; mean() = tỷ lệ pixel ROI.
+    Trả về giá trị trong [0, 1].
+    """
+    return float(np.mean([m.mean() for m in masks]))
+
+
+def select_delta_crf(roi_ratio: float) -> int:
+    """Việc 2: rule rời rạc chọn ΔCRF từ roi_ratio của GOP.
+
+    roi_ratio < 0.25  → ΔCRF = 5  (ROI nhỏ, ưu tiên mạnh vùng quan trọng)
+    0.25 ≤ roi_ratio ≤ 0.43 → ΔCRF = 3  (ROI trung bình, cân bằng)
+    roi_ratio > 0.43  → ΔCRF = 2  (ROI lớn, giảm chênh lệch tránh tăng bitrate)
+    """
+    if roi_ratio < 0.25:
+        return 5
+    elif roi_ratio <= 0.43:
+        return 3
+    else:
+        return 2

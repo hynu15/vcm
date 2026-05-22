@@ -20,14 +20,14 @@ from train_segmentation import (
 )
 
 NUM_CLASSES = 4
-# Class ID: 0=ROI, 1=sky, 2=construction, 3=nature
+# Class ID: 0=background, 1=road, 2=vehicle, 3=pedestrian
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 
 # ====================== Dataset 4-class ======================
 class Cityscapes4Class(Dataset):
-    """Dataset 4-class: ROI(0) / sky(1) / construction(2) / nature(3)."""
+    """Dataset 4-class: background(0) / road(1) / vehicle(2) / pedestrian(3)."""
 
     def __init__(self, image_root, label_root, transform=None, image_size=None, cities=None):
         self.image_root = image_root
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
     print(f"Đang dùng: {device} - {device_name}")
-    print(f"Num classes: {NUM_CLASSES}  (0=ROI, 1=sky, 2=construction, 3=nature)")
+    print(f"Num classes: {NUM_CLASSES}  (0=background, 1=road, 2=vehicle, 3=pedestrian)")
 
     IMAGE_TRAIN_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "leftImg8bit_trainvaltest", "leftImg8bit", "train")
     LABEL_TRAIN_DIR = os.path.join(PROJECT_ROOT, "data", "gt_4class", "train")

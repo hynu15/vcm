@@ -1,352 +1,150 @@
-\documentclass[12pt,a4paper]{article}
+% !TeX root = ../../thesis.tex
+% =====================================================================
+% CHƯƠNG 3: PHƯƠNG PHÁP ĐỀ XUẤT
+% =====================================================================
+\chapter{PHƯƠNG PHÁP ĐỀ XUẤT}
+\label{chap:phuong-phap}
+ 
+Chương 3 trình bày chi tiết kiến trúc hệ thống mã hóa video cho thị giác máy được đề xuất trong đồ án, tập trung vào việc tích hợp mô hình phân đoạn ngữ nghĩa PIDNet-L vào khung làm việc nén nhận thức ngữ nghĩa SAC. Nội dung được tổ chức thành bốn phần. Phần đầu (mục 3.1) trình bày sơ đồ khối tổng quát của hệ thống, thuật toán điều phối end-to-end và quy trình xử lý tập dữ liệu Cityscapes. Phần thứ hai (mục 3.2) mô tả chi tiết hai mô hình phân đoạn được sử dụng trong đồ án --- CCNet (tái hiện theo paper gốc Wang \textit{et al.} 2023 làm baseline so sánh) và PIDNet-L (mô hình đề xuất chính) --- kèm theo cấu hình huấn luyện, hàm loss, cơ chế tách hai luồng, hàm mục tiêu rate-distortion mở rộng và luồng nén/giải nén bằng FFmpeg. Phần thứ ba (mục 3.3) mô tả nền tảng thực nghiệm phần cứng và phần mềm. Phần cuối (mục 3.4) tổng hợp các cấu hình quan trọng phục vụ tái hiện thí nghiệm: tham số huấn luyện, lệnh FFmpeg, năm điểm vận hành QP và đường dẫn dữ liệu.
+ 
+\section{Tổng quan kiến trúc hệ thống đề xuất}
+\label{sec:tong-quan-kien-truc}
+ 
+\subsection{Sơ đồ khối toàn hệ thống}
+\label{subsec:so-do-khoi-ht}
+ 
+Hệ thống mã hóa video cho thị giác máy đề xuất trong đồ án được thiết kế theo nguyên tắc kế thừa kiến trúc tổng thể của khung làm việc SAC được đề xuất 2023. Hệ thống bao gồm bốn khối chức năng chính được kết nối tuần tự là khối phân đoạn ngữ nghĩa, khối tách thành hai luồng video, khối nén hai mức và khối kết hợp.
+ 
+\input{chapters/c3/compression_framework_figure}
 
-% --- Packages ---
-\usepackage[utf8]{inputenc}
-\usepackage[T5]{fontenc}
-\usepackage[vietnamese,english]{babel}
-\usepackage{geometry}
-\geometry{margin=2.5cm, top=3cm, bottom=3cm}
-\usepackage{amsmath,amssymb}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{array}
-\usepackage{multirow}
-\usepackage{xcolor}
-\usepackage{hyperref}
-\usepackage{caption}
-\usepackage{subcaption}
-\usepackage{float}
-\usepackage{enumitem}
-\usepackage{setspace}
-\usepackage{fancyhdr}
-\usepackage{titlesec}
-\usepackage{tikz}
-\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
-\usepackage{pgfplots}
-\pgfplotsset{compat=1.18}
-\usepackage{listings}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
 
-% --- Layout ---
-\setstretch{1.3}
-\pagestyle{fancy}
-\fancyhf{}
-\fancyhead[L]{\small Báo cáo: Semantic-Aware Compression}
-\fancyhead[R]{\small Nguyễn Hữu Huy}
-\fancyfoot[C]{\thepage}
-\renewcommand{\headrulewidth}{0.4pt}
+Khối phân đoạn ngữ nghĩa nhận chuỗi khung hình đầu vào và tạo ra bản đồ phân đoạn ở cấp điểm ảnh, trong đó mỗi điểm ảnh được gán một trong hai nhãn là vùng quan tâm hoặc ngoài vùng quan tâm. Khối tách dòng chuyển bản đồ phân đoạn thành hai mặt nạ nhị phân tương ứng với hai vùng, sau đó áp dụng các mặt nạ này lên khung hình gốc để tạo ra hai dòng dữ liệu riêng biệt. Khối nén hai mức sử dụng hai bộ mã hóa HEVC/AVC chạy song song với các giá trị hệ số tốc độ khác nhau để mã hóa hai dòng. Khối tái hợp dòng giải mã hai dòng và cộng các khung hình tái tạo lại với nhau để tạo thành khung hình hoàn chỉnh trước khi đưa vào tác vụ thị giác máy hạ nguồn.
 
-% --- Colors ---
-\definecolor{royalblue}{RGB}{65,105,225}
-\definecolor{forestgreen}{RGB}{34,139,34}
-\definecolor{crimson}{RGB}{220,20,60}
-\definecolor{darkorange}{RGB}{255,140,0}
-\definecolor{lightgray}{RGB}{245,245,245}
+\subsection{Thuật toán điều phối hệ thống đề xuất}
+\label{subsec:thuat-toan-sac}
 
-% --- TikZ styles ---
-\tikzset{
-  block/.style={rectangle, draw=royalblue!70, fill=royalblue!10,
-                rounded corners=4pt, minimum width=2.8cm, minimum height=0.9cm,
-                text centered, font=\small\bfseries},
-  wideblock/.style={block, minimum width=4.0cm},
-  arrow/.style={-Stealth, thick, royalblue!80},
-  dasharrow/.style={-Stealth, thick, dashed, gray!70},
-  annot/.style={font=\footnotesize\itshape, text=gray!70},
-  roiblock/.style={rectangle, draw=forestgreen!70, fill=forestgreen!10,
-                   rounded corners=4pt, minimum width=2.5cm, minimum height=0.75cm,
-                   text centered, font=\small},
-  nonroiblock/.style={rectangle, draw=crimson!70, fill=crimson!10,
-                      rounded corners=4pt, minimum width=2.5cm, minimum height=0.75cm,
-                      text centered, font=\small},
-  roundbox/.style={rectangle, draw=darkorange!70, fill=darkorange!8,
-                   rounded corners=6pt, minimum width=3cm, minimum height=0.8cm,
-                   text centered, font=\small\bfseries},
-}
+Để cung cấp một cái nhìn tổng thể về luồng xử lý end-to-end của hệ thống, Thuật toán~\ref{alg:sac-pipeline} tóm tắt sáu bước thực thi tuần tự trên mỗi khung hình $x_t$ của chuỗi đầu vào. Bốn bước đầu (S1--S3 và bước tổ hợp) là phần cốt lõi của khung làm việc SAC; hai bước cuối (giải mã và đánh giá) phục vụ pha kiểm thử, không có mặt khi triển khai thực tế trên xe.
 
-\hypersetup{
-  colorlinks=true, linkcolor=royalblue, citecolor=forestgreen, urlcolor=royalblue
-}
+\begin{algorithm}[H]
+\caption{Mã hóa nhận thức ngữ nghĩa SAC end-to-end}
+\label{alg:sac-pipeline}
+\begin{algorithmic}[1]
+\Require Chuỗi khung hình $X = \{x_1, \dots, x_T\}$; mô hình phân đoạn $f_\theta$; cặp hệ số $(C_\mathrm{ROI}, C_\mathrm{nROI})$ với $C_\mathrm{ROI} < C_\mathrm{nROI}$; kích thước khối lọc mặt nạ $b = 16$
+\Ensure Chuỗi tái tạo $\hat{X} = \{\hat{x}_1, \dots, \hat{x}_T\}$
+\For{$t = 1$ \textbf{to} $T$}
+  \State $S_t \leftarrow f_\theta(\text{Resize}(x_t, 1024\times 512))$ \Comment{S1: bản đồ phân đoạn 4 lớp}
+  \State $M_t^\mathrm{ROI} \leftarrow \mathbf{1}[S_t \notin \{\text{sky}, \text{construction}, \text{nature}\}]$
+  \State $M_t^\mathrm{ROI} \leftarrow \text{MacroblockAlign}(M_t^\mathrm{ROI}, b)$ \Comment{S2: snap về lưới $b\times b$}
+  \State $M_t^\mathrm{nROI} \leftarrow 1 - M_t^\mathrm{ROI}$
+  \State $S_t^I \leftarrow M_t^\mathrm{ROI} \odot x_t$;\quad $S_t^N \leftarrow M_t^\mathrm{nROI} \odot x_t$ \Comment{tách hai luồng}
+\EndFor
+\State $V_I \leftarrow \textsc{FFmpegEncode}(\{S_t^I\}, \text{codec}, C_\mathrm{ROI})$ \Comment{S3a: nén nhẹ vùng ROI}
+\State $V_N \leftarrow \textsc{FFmpegEncode}(\{S_t^N\}, \text{codec}, C_\mathrm{nROI})$ \Comment{S3b: nén mạnh vùng nền}
+\State $\{\bar{S}_t^I\} \leftarrow \textsc{FFmpegDecode}(V_I)$;\quad $\{\bar{S}_t^N\} \leftarrow \textsc{FFmpegDecode}(V_N)$
+\For{$t = 1$ \textbf{to} $T$}
+  \State $\hat{x}_t \leftarrow \bar{S}_t^I \oplus \bar{S}_t^N$ \Comment{cộng bão hòa hoặc \texttt{blend=addition}}
+\EndFor
+\State \Return $\hat{X}$
+\end{algorithmic}
+\end{algorithm}
 
-% --- Title ---
-\title{
-  \vspace{-1cm}
-  {\Large \textbf{Báo cáo Thực nghiệm}}\\[0.4cm]
-  {\LARGE \textbf{Nén Video Nhận Thức Ngữ Nghĩa}}\\[0.2cm]
-  {\large \textit{Semantic-Aware Compression (SAC) với H.265/HEVC}}\\[0.4cm]
-  {\large trên tập dữ liệu Cityscapes}\\[0.6cm]
-  \rule{\textwidth}{1pt}
-}
-\author{
-  \textbf{Nguyễn Hữu Huy}\\[0.2cm]
-  \small{Dự án nghiên cứu cá nhân}
-}
-\date{\today}
+Ba quan sát cần lưu ý từ Thuật toán~\ref{alg:sac-pipeline}. Thứ nhất, bước S3a và S3b được thiết kế chạy song song trên hai tiến trình FFmpeg độc lập, nên thời gian thực hiện thực tế xấp xỉ $\max(\text{enc}_\mathrm{ROI},\,\text{enc}_\mathrm{nROI})$ chứ không phải tổng. Thứ hai, phép $\oplus$ tại dòng 12 được hiện thực bằng \texttt{cv2.add} (cộng bão hòa, ngưỡng $255$) trong pipeline CCNet hoặc bằng bộ lọc \texttt{blend=all\_mode=addition} của FFmpeg trong pipeline PIDNet-L; hai cách hiện thực cho kết quả tương đương về mặt số do hai dòng có pixel ngoài mặt nạ luôn bằng không. Thứ ba, vòng lặp tách luồng (dòng 2--7) và hai bước nén (dòng 8--9) có thể được pipeline theo kiểu producer/consumer khi triển khai trực tiếp trên ECU để giảm độ trễ tổng cộng.
 
-% ============================================================
-\begin{document}
 
-\maketitle
-\thispagestyle{empty}
-\vspace{0.5cm}
+\subsection{Xử lý tập dữ liệu Cityscapes}
+Tập Cityscapes gtFine gồm khoảng 2975 ảnh huấn luyện, 500 ảnh validation và 1525 ảnh test. Do tập test chính thức không công bố nhãn, thực nghiệm trong đồ án chia lại một phần tập huấn luyện, trong đó hai thành phố Ulm và Strasbourg được tách ra làm tập đánh giá nội bộ để có thể đo liên tục trong quá trình phát triển mô hình.
 
-\begin{abstract}
-Báo cáo triển khai và đánh giá hệ thống nén video nhận thức ngữ nghĩa (Semantic-Aware Compression -- SAC) theo Wang và cộng sự \cite{wang2023sac}: PIDNet phân vùng ROI, x265 mã hóa hai luồng ROI/non-ROI với CRF khác nhau, rồi ghép lại. Thực nghiệm trên Cityscapes đo bằng SA-PSNR, SA-SSIM, mIoU và RD curve so với baseline đơn luồng. Báo cáo cũng trình bày phiên bản tái cấu trúc \texttt{new\_feature} với các chỉnh sửa fill mode, decode tách rời và sửa lỗi \texttt{aq-mode}, kèm so sánh BD-Rate giữa hai chiến lược fill và phân tích RD theo từng vùng ROI/non-ROI trên 100 frame.
-\end{abstract}
-
-\tableofcontents
-\newpage
-
-% ============================================================
-\section{Giới thiệu}
-
-Trong camera xe tự lái và giám sát đô thị, đường, phương tiện, người đi bộ cần độ sắc nét cao vì ảnh hưởng trực tiếp đến quyết định điều hướng; trong khi bầu trời, công trình, thảm thực vật phía xa có thể chịu được nén mạnh hơn. SAC khai thác đặc điểm này bằng cách kết hợp phân đoạn ngữ nghĩa với codec video tiêu chuẩn.
-
-Pipeline gốc \cite{wang2023sac} gồm ba giai đoạn: S1 phân đoạn, S2 tách hai luồng ROI/non-ROI, S3 mã hóa hai luồng với CRF khác nhau và ghép lại. Mục tiêu là tối ưu chỉ số SA-PSNR có trọng số theo vùng, không phải PSNR toàn frame.
-
-Dự án này triển khai lại pipeline với PIDNet làm mô hình phân đoạn và Cityscapes làm dữ liệu, sau đó tái cấu trúc thành package \texttt{new\_feature} kèm các cải tiến kỹ thuật.
-
-% ============================================================
-\section{Cơ sở lý thuyết}
-
-\subsection{Bài toán nén video nhận thức ngữ nghĩa}
-
-Đặt $X = \{x_t\}_{t=1}^{T}$ là chuỗi frame $x_t \in \mathbb{R}^{H \times W \times 3}$. Thay vì mã hóa toàn frame ở một mức chất lượng đồng đều, SAC phân bổ bitrate không đồng đều theo tầm quan trọng ngữ nghĩa. Mô hình phân đoạn $\mathcal{F}$ tạo mặt nạ $M_t = \mathcal{F}(x_t)$ với 4 lớp: class 0 (ROI -- đối tượng quan trọng cho lái xe), class 1 (sky), class 2 (construction), class 3 (nature).
-
-\subsection{Dataset Cityscapes}
-
-Cityscapes \cite{cityscapes2016} gồm ảnh đường phố $2048 \times 1024$ với 34 lớp pixel-level, được ánh xạ về 4 lớp theo \cite{wang2023sac}: ROI gồm đường/xe/người, còn lại là sky, construction (tòa nhà, tường, hàng rào, cột) và nature (thực vật, mặt đất). Tập validation 500 frame (Frankfurt, Lindau, Munster) dùng cho đánh giá; thí nghiệm encode chạy trên 20 frame đại diện.
-
-\subsection{Codec H.265/HEVC và tham số CRF}
-
-CRF (Constant Rate Factor, 0--51) kiểm soát đánh đổi giữa kích thước file và chất lượng -- CRF thấp $\Rightarrow$ chất lượng cao. SAC dùng hai CRF với $C_{\mathrm{roi}} < C_{\mathrm{non}}$ để ưu tiên ROI.
-
-Tham số \texttt{aq-mode} (Adaptive Quantization) khi bật sẽ tự phân phối lại lượng tử hóa trong frame, phá vỡ giả thuyết của SAC. Do đó bắt buộc đặt \texttt{aq-mode=0} ở mọi lần encode.
-
-% ============================================================
-\section{Mô hình PIDNet và lý do lựa chọn}
-
-\subsection{Kiến trúc tổng thể}
-
-PIDNet \cite{xu2023pidnet} là mạng phân đoạn ngữ nghĩa nhẹ lấy cảm hứng từ điều khiển PID. Sau stem chung, kiến trúc tách thành ba nhánh xử lý song song ở các độ phân giải khác nhau rồi hợp nhất.
-
-\begin{figure}[H]
-\centering
-\resizebox{\linewidth}{!}{%
-\begin{tikzpicture}[node distance=0.7cm and 1.2cm]
-  % Input
-  \node[block, fill=gray!15, draw=gray!60] (input) {Input\\$H \times W \times 3$};
-
-  % Stem
-  \node[block, right=1.4cm of input] (stem) {Stem\\$\downarrow 4\times$\\$32$ ch};
-  \draw[arrow] (input) -- (stem);
-
-  % P branch
-  \node[roiblock, above right=0.8cm and 1.2cm of stem] (p) {P-branch\\(Detail, $H/4$)\\32 ch};
-  % D branch
-  \node[block, right=1.2cm of stem, fill=darkorange!10, draw=darkorange!60] (d) {D-branch\\(Boundary, $H/4$)\\64 ch};
-  % I branch
-  \node[nonroiblock, below right=0.8cm and 1.2cm of stem] (i) {I-branch\\(Context, $H/8$)\\128 ch};
-
-  \draw[arrow] (stem) -- (p);
-  \draw[arrow] (stem) -- (d);
-  \draw[arrow] (stem) -- (i);
-
-  % I upsampling
-  \node[block, fill=gray!10, draw=gray!50, right=1.1cm of i, yshift=0.3cm] (iup) {Upsample\\$H/4$, 32 ch};
-  \draw[arrow] (i) -- (iup);
-
-  % Fuse
-  \node[roundbox, right=3.8cm of stem] (fuse) {Fuse\\concat + Conv\\$96$ ch};
-  \draw[arrow] (p.east) -- ++(0.3,0) |- (fuse.west);
-  \draw[arrow] (d.east) -- (fuse.west);
-  \draw[arrow] (iup.north) -- ++(0,0.3) -| (fuse.west);
-
-  % Classifier
-  \node[block, right=1.2cm of fuse, fill=purple!10, draw=purple!60] (cls) {Classifier\\$1\times1$ Conv\\4 classes};
-  \draw[arrow] (fuse) -- (cls);
-
-  % Output
-  \node[block, right=1.1cm of cls, fill=green!12, draw=green!60] (out) {Output\\$\uparrow H \times W$\\Seg map};
-  \draw[arrow] (cls) -- (out);
-
-  % Labels
-  \node[annot, above=0.15cm of p] {Stride=1, dw-sep};
-  \node[annot, below=0.15cm of i] {Stride=2, dilation=2};
-\end{tikzpicture}%
-}
-\caption{Kiến trúc PIDNet-S với ba nhánh P (chi tiết), I (ngữ cảnh), D (biên).}
-\label{fig:pidnet_arch}
-\end{figure}
-
-Sau stem ($\downarrow 4\times$), ba nhánh hoạt động song song:
-\begin{itemize}[leftmargin=1.5em]
-  \item P-branch (Proportional, $H/4$, 32 ch): chi tiết hình học cục bộ.
-  \item I-branch (Integral, $H/8$, dilation=2, 128 ch): ngữ cảnh toàn cục.
-  \item D-branch (Derivative, $H/4$, dilation=2, 64 ch): biên và gradient.
+Nhãn gốc của Cityscapes gồm 19 lớp. Tuy nhiên, bài toán mã hóa nhận thức ngữ nghĩa chỉ cần phân biệt vùng quan tâm (ROI) và ngoài vùng quan tâm (non-ROI), nên đồ án khảo sát hai cách gom lớp:
+\begin{itemize}
+    \item Bài toán 2 lớp gồm non-ROI và ROI. Cách này thường làm mIoU huấn luyện tăng, nhưng khi đánh giá tác động của codec thì khó quan sát rõ khác biệt giữa các phương pháp H.264/H.265 và SAC.
+    \item Bài toán 4 lớp gồm ROI, công trình (construction), thiên nhiên (nature) và bầu trời (sky). Nhóm công trình bao gồm tòa nhà, tường, hàng rào, rào chắn an toàn, cầu và hầm; nhóm thiên nhiên bao gồm thảm thực vật, cây cối và địa hình.
 \end{itemize}
-I-branch được upsample về $H/4$, ba nhánh được concat rồi qua Conv $3\times3$ và classifier $1\times1$, cuối cùng bilinear upsample về kích thước gốc.
+Trong hệ thống chính, cấu hình 4 lớp được sử dụng vì vẫn giữ được thông tin về các vùng non-ROI lớn, đồng thời cho phép ánh xạ ngược về ROI/non-ROI khi tạo mặt nạ nén.
 
-\subsection{Tại sao PIDNet phù hợp với SAC?}
 
-PIDNet phù hợp ba lý do: (i) nhẹ -- PIDNet-L có $\sim$36M tham số, inference 6{,}08 ms/frame trên GPU, nhanh hơn $\sim$20 lần CCNet ResNet101 nên không tạo bottleneck trước bước encode; (ii) chính xác -- đạt mIoU $= 0{,}8498$ và IoU ROI $= 0{,}9117$ trên 500 frame val, xác định đúng vùng cần giữ chất lượng cao; (iii) biên sắc -- D-branch giúp mặt nạ có biên rõ, quan trọng vì biên (sau khi snap lưới $16\times16$) quyết định nơi chuyển giữa hai mức chất lượng encode.
+ 
+\section{Mô hình phân đoạn phát hiện vùng quan tâm}
+\label{sec:mo-dun-roi}
+ 
+\subsection{Giới thiệu kiến trúc hai mô hình phân đoạn}
+\label{subsec:lua-chon-mo-hinh}
+ 
+Kiến trúc phân đoạn trong phương pháp gốc được xây dựng trên mạng nền ResNet kết hợp với các mô-đun chú ý chữ thập của CCNet. Ở tầng đầu, khung hình đầu vào được giảm kích thước từ độ phân giải gốc $2048\times1024$ xuống $1024\times512$ nhằm giảm chi phí tính toán trước khi đưa vào mạng phân đoạn. ResNet đóng vai trò là bộ trích xuất đặc trưng chính, biến ảnh đầu vào thành biểu diễn đặc trưng mức cao $\bar{X}$. Biểu diễn này sau đó đi qua khối \textit{Reduction} để giảm số chiều kênh và tạo đặc trưng trung gian $H$, giúp giảm tải cho các khối chú ý phía sau.
 
-% ============================================================
-\section{Pipeline thực hiện}
+Sau bước giảm chiều, đặc trưng $H$ lần lượt được đưa qua hai mô-đun \textit{Criss-Cross Attention}. Các mô-đun này có nhiệm vụ mở rộng trường tiếp nhận ngữ cảnh bằng cách trao đổi thông tin theo các hướng hàng và cột trong bản đồ đặc trưng, từ đó hỗ trợ mô hình nhận biết mối quan hệ giữa các vùng ở khoảng cách xa trong khung hình. Đầu ra sau hai bước chú ý lần lượt được ký hiệu là $H'$ và $H''$. Bên cạnh nhánh xử lý tuần tự, kiến trúc còn sử dụng một kết nối tắt từ đặc trưng $H$ sau khối \textit{Reduction} đến nút cộng ở cuối chuỗi chú ý. Cơ chế này giúp bảo toàn thông tin đặc trưng ban đầu và hạn chế mất mát chi tiết khi đặc trưng đi qua các khối chú ý. Cuối cùng, đặc trưng hợp nhất được đưa vào khối \textit{Segmentation} để sinh bản đồ phân đoạn mức xám kích thước $1024\times512$, biểu diễn vùng quan tâm phục vụ bước tách luồng nén.
 
-\subsection{Sơ đồ tổng thể}
 
-\begin{figure}[H]
-\centering
-\resizebox{\linewidth}{!}{%
-\begin{tikzpicture}[node distance=0.55cm and 1.3cm]
+\input{chapters/c3/roi_segmentation_network_figure}
 
-  %--- Row 1: Input -> S1 ---
-  \node[block, fill=gray!10, draw=gray!50] (frame) at (0,0) {Frame\\$x_t$};
+Ưu điểm của kiến trúc ResNet--CCNet là khả năng khai thác ngữ cảnh toàn cục tốt, phù hợp với bài toán phân biệt các vùng ngữ nghĩa lớn trong ảnh đô thị. Tuy nhiên, việc sử dụng ResNet làm mạng trích xuất đặc trưng cùng hai mô-đun chú ý khiến chi phí tính toán tương đối cao. Ngoài ra, kiến trúc này không có nhánh chuyên biệt cho thông tin đường biên, trong khi ranh giới giữa ROI và non-ROI có ảnh hưởng trực tiếp đến chất lượng mặt nạ nén. Vì vậy, đồ án sử dụng kiến trúc này như baseline so sánh và tập trung thay thế mô-đun phân đoạn bằng PIDNet-L.
 
-  \node[wideblock, right=1.5cm of frame] (seg) {S1: Segmentation\\PIDNet};
-  \draw[arrow] (frame) -- (seg);
 
-  \node[block, right=1.4cm of seg] (mask) {4-class\\mask $M_t$};
-  \draw[arrow] (seg) -- (mask);
+Trong họ ba phiên bản của PIDNet, phiên bản PIDNet-L được lựa chọn cho đồ án này dựa trên ba tiêu chí. Tiêu chí thứ nhất là độ chính xác phân đoạn. PIDNet-L đạt 80,6\% mIoU trên tập kiểm tra Cityscapes, là kiến trúc thời gian thực có độ chính xác cao nhất trên tập này tại thời điểm công bố. Mức độ chính xác cao đặc biệt quan trọng đối với bài toán nén video cho thị giác máy vì sai số phân đoạn sẽ kéo theo việc phân loại sai các vùng quan trọng và làm giảm hiệu quả của cơ chế phân bổ bitrate. Tiêu chí thứ hai là khả năng xử lý đường biên. PIDNet-L có nhánh D chuyên trách phát hiện biên với chiều sâu lớn hơn so với PIDNet-S và PIDNet-M, giúp giảm thiểu các nhiễu artefact tại ranh giới giữa vùng quan tâm và vùng nền, vốn là vấn đề mà phương pháp gốc đã ghi nhận. Tiêu chí thứ ba là tốc độ. Mặc dù nặng nhất trong họ PIDNet, PIDNet-L vẫn đạt 31,1 khung hình mỗi giây trên GPU thông dụng, gấp khoảng 2,5 lần tốc độ của CCNet với ResNet-101 trong phương pháp gốc, đáp ứng yêu cầu thời gian thực cho các camera ô tô tiêu chuẩn.
 
-  \node[block, right=1.2cm of mask, fill=forestgreen!12, draw=forestgreen!60] (align) {Macroblock\\Align\\$16\times16$};
-  \draw[arrow] (mask) -- (align);
+\subsubsection{Kiến trúc ba nhánh I-P-D của PIDNet-L}
+\label{subsec:pidnet-3-branch}
 
-  %--- Annotation row 1 ---
-  \node[annot, below=0.2cm of seg] {$512\times1024$, 50 epochs};
-  \node[annot, below=0.2cm of align] {snap to grid};
+Khác với CCNet sử dụng kiến trúc một nhánh cộng thêm hai mô-đun chú ý chữ thập, PIDNet-L được thiết kế theo cảm hứng từ bộ điều khiển PID (Proportional--Integral--Derivative) trong lý thuyết điều khiển, với ba nhánh xử lý song song có vai trò bù trừ lẫn nhau. Ba nhánh được đặt tên tương ứng là I (Integral, ngữ cảnh ngữ nghĩa toàn cục), P (Proportional, chi tiết không gian độ phân giải cao) và D (Derivative, biên đối tượng). Cấu hình PIDNet-L trong đồ án được khởi tạo với các siêu tham số \texttt{m=3}, \texttt{n=4}, \texttt{planes=64}, \texttt{ppm\_planes=112} và \texttt{head\_planes=256}, kế thừa từ mã nguồn chính thức của các tác giả PIDNet.
 
-  %--- Row 2: S2 stream separation ---
-  \node[roiblock, below=1.5cm of align, xshift=-1.8cm] (roi) {ROI stream $S_i$\\$M_i \odot x_t$};
-  \node[nonroiblock, below=1.5cm of align, xshift=1.8cm] (non) {non-ROI stream $S_n$\\$M_n \odot x_t$};
+\paragraph{Nhánh I --- Integral / ngữ cảnh ngữ nghĩa.} Đây là xương sống chính của mạng, gồm khối stem hai tầng tích chập $3\times3$ (3$\to$64) và năm khối residual lần lượt sinh các bản đồ đặc trưng có số kênh $64,\,128,\,256,\,512,\,512$ ở các tỉ lệ không gian $1/4,\,1/8,\,1/16,\,1/32,\,1/64$ so với ảnh gốc. Khối cuối được tăng cường bằng mô-đun \textit{Parallel Aggregation Pyramid Pooling Module} (PAPPM) với \texttt{ppm\_planes=112} để thu thông tin ngữ cảnh ở nhiều tỉ lệ. Vai trò của nhánh I là cung cấp thông tin lớp đối tượng (đường, xe, người, công trình, thiên nhiên, bầu trời) trên trường tiếp nhận rộng.
 
-  \draw[arrow] (align.south) -- ++(0,-0.5) -| (roi.north) node[midway, left, annot]{S2};
-  \draw[arrow] (align.south) -- ++(0,-0.5) -| (non.north);
+\paragraph{Nhánh P --- Proportional / chi tiết không gian.} Nhánh P được trích nhánh từ đầu ra của khối residual thứ hai của nhánh I (độ phân giải $1/8$), sau đó duy trì độ phân giải này xuyên suốt và xử lý thêm bằng hai khối residual nhẹ với 128 kênh. Mục đích của nhánh P là bảo toàn vị trí biên đối tượng và các chi tiết nhỏ vốn bị mờ do downsampling sâu trong nhánh I. Hai mô-đun \textit{Pixel-attention-guided Fusion Module} (PagFM) được dùng để hợp nhất đặc trưng của P và I sau mỗi lần I downsample tiếp theo, đảm bảo dòng thông tin từ nhánh ngữ cảnh đổ ngược về nhánh chi tiết một cách có chọn lọc.
 
-  %--- Row 3: S3 encode ---
-  \node[roiblock, below=1.2cm of roi] (encROI) {Encode x265\\CRF$_{\mathrm{roi}}$, aq-mode=0};
-  \node[nonroiblock, below=1.2cm of non] (encNon) {Encode x265\\CRF$_{\mathrm{non}}$, aq-mode=0};
+\paragraph{Nhánh D --- Derivative / phát hiện biên.} Nhánh D song song với nhánh P, sử dụng các khối bottleneck mỏng để dự đoán bản đồ biên một kênh $G_b \in [0,1]^{H\times W}$. Sau ba khối xử lý, đặc trưng biên của nhánh D được hợp nhất với đặc trưng ngữ nghĩa thông qua mô-đun \textit{Boundary-attention-guided Fusion Module} (Bag), tại đó bản đồ biên đóng vai trò trọng số chú ý không gian: pixel càng gần biên thì trọng số đến từ nhánh chi tiết P càng lớn, ngược lại pixel ở vùng nội đối tượng lấy trọng số từ nhánh ngữ cảnh I. Cơ chế này lý giải vì sao PIDNet-L tạo được mặt nạ ROI với biên sắc nét hơn CCNet, hạn chế hiện tượng pixel ROI bị lan sang khối non-ROI khi áp dụng macroblock filter $16\times 16$ ở khối S2.
 
-  \draw[arrow] (roi) -- (encROI) node[midway, left, annot]{S3};
-  \draw[arrow] (non) -- (encNon);
-
-  %--- Row 4: decode ---
-  \node[roiblock, below=1.1cm of encROI] (decROI) {Decode\\$\bar{S}_i$};
-  \node[nonroiblock, below=1.1cm of encNon] (decNon) {Decode\\$\bar{S}_n$};
-  \draw[arrow] (encROI) -- (decROI);
-  \draw[arrow] (encNon) -- (decNon);
-
-  %--- Row 5: merge ---
-  \node[roundbox, below right=1.1cm and -2.5cm of decROI] (merge) {Merge\\$\bar{x}_t = \bar{S}_i + \bar{S}_n$};
-  \draw[arrow] (decROI) -- (merge);
-  \draw[arrow] (decNon) -- (merge);
-
-  %--- Output ---
-  \node[block, right=1.2cm of merge, fill=green!12, draw=green!60] (recon) {Reconstructed\\$\bar{x}_t$};
-  \draw[arrow] (merge) -- (recon);
-
-  %--- Baseline branch ---
-  \node[block, above=1.5cm of merge, xshift=3.5cm, fill=gray!12, draw=gray!60] (trad) {Baseline x265\\CRF$_{\mathrm{trad}}$};
-  \draw[dasharrow] (frame.east) -- ++(0.5,0) |- (trad.west) node[near start, above, annot]{truyền thống};
-
-  %--- Metrics ---
-  \node[block, below=1.0cm of recon, xshift=-0.5cm, fill=purple!10, draw=purple!50] (metric) {Metrics\\SA-PSNR, mIoU\\BD-Rate};
-  \draw[arrow] (recon) -- (metric);
-  \draw[dasharrow] (trad.east) -- ++(0.4,0) |- (metric.east) node[near start, right, annot]{};
-
-\end{tikzpicture}%
-}
-\caption{Sơ đồ pipeline SAC đầy đủ từ frame đầu vào đến tính metric so sánh.}
-\label{fig:pipeline}
-\end{figure}
-
-\subsection{Giai đoạn S1: Phân đoạn ngữ nghĩa}
-
-Mỗi frame gốc $x_t$ được resize về $512 \times 1024$ và chuẩn hóa theo thống kê ImageNet trước khi đưa vào PIDNet. Model dự đoán logit $\hat{y}_t \in \mathbb{R}^{4 \times H' \times W'}$, sau đó argmax cho ra mặt nạ phân lớp $M_t \in \{0,1,2,3\}^{H' \times W'}$. Cuối cùng, $M_t$ được resize về kích thước ảnh gốc bằng nearest-neighbor interpolation để giữ ranh giới pixel sắc nét.
-
-Mặt nạ nhị phân ROI được tạo bởi:
-\begin{equation}
-  B_t(i,j) = \mathbf{1}\bigl[M_t(i,j) = 0\bigr]
-  \label{eq:binary_mask}
-\end{equation}
-
-\subsection{Giai đoạn S2: Căn chỉnh macroblock và tách luồng}
-
-Codec x265 xử lý ảnh theo các đơn vị CTU (Coding Tree Unit) kích thước $16\times16$ pixel. Nếu biên ROI không trùng với lưới này, encoder sẽ phải nhìn thấy gradient sắc nét ngay giữa block, dẫn đến rò rỉ artifact chất lượng qua block boundaries. Để tránh điều này, mặt nạ $B_t$ được snap về lưới macroblock:
-
-\begin{equation}
-  \hat{B}_t[p,q] = \max_{(i,j) \in \mathcal{B}(p,q)} B_t(i,j)
-  \label{eq:mb_align}
-\end{equation}
-trong đó $\mathcal{B}(p,q)$ là tập pixel thuộc block thứ $(p,q)$. Quy tắc này đảm bảo nếu bất kỳ pixel nào trong block là ROI thì toàn bộ block được coi là ROI.
-
-Từ mặt nạ căn chỉnh $\hat{B}_t$, hai luồng được tạo:
-\begin{align}
-  S_i &= \hat{B}_t \odot x_t, \quad \text{(ROI stream)} \label{eq:roi_stream}\\
-  S_n &= (1 - \hat{B}_t) \odot x_t \quad \text{(non-ROI stream)} \label{eq:non_stream}
-\end{align}
-Vùng không thuộc luồng được điền giá trị 0 (zero fill, theo paper gốc) hoặc các chiến lược fill thay thế (xem Phần~\ref{sec:new_feature}).
-
-\subsection{Giai đoạn S3: Mã hóa hai luồng}
-
-Hai luồng được encode riêng bằng x265 với hai mức CRF khác nhau:
-\begin{itemize}[leftmargin=1.5em]
-  \item $S_i \xrightarrow{\text{CRF}_{\mathrm{roi}}}$ \texttt{roi.mp4} -- CRF thấp, chất lượng cao
-  \item $S_n \xrightarrow{\text{CRF}_{\mathrm{non}}}$ \texttt{nonroi.mp4} -- CRF cao, nén mạnh
+\paragraph{Ba đầu ra trong huấn luyện và một đầu ra khi suy diễn.} Khi chế độ \texttt{augment=True} (lúc huấn luyện), \texttt{forward} của PIDNet-L trả về một danh sách ba tensor:
+\begin{itemize}
+  \item $x_{\text{extra-p}} \in \mathbb{R}^{B\times C\times H\times W}$: dự đoán phụ từ nhánh P, dùng cho loss $\mathcal{L}_P$;
+  \item $x_{\text{main}} \in \mathbb{R}^{B\times C\times H\times W}$: dự đoán chính sau Bag, dùng cho $\mathcal{L}_{\text{main}}$ và $\mathcal{L}_{\text{BAS}}$;
+  \item $x_{\text{extra-d}} \in \mathbb{R}^{B\times 1\times H\times W}$: bản đồ biên từ nhánh D, dùng cho $\mathcal{L}_D$.
 \end{itemize}
+Khi suy diễn để sinh mặt nạ ROI cho pipeline SAC, mô hình được đặt \texttt{augment=False} và chỉ trả về $x_{\text{main}}$, sau đó được lấy argmax để cho ra bản đồ phân đoạn bốn lớp. Số tham số có thể huấn luyện của PIDNet-L với cấu hình trên là khoảng 36 triệu, ít hơn xấp xỉ 20\% so với CCNet ResNet-101 trong cùng bài toán 4 lớp, đồng thời nhanh hơn 2,5 lần ở pha suy diễn nhờ không phải tính toán mô-đun chú ý chữ thập có độ phức tạp $O(H\cdot W\cdot(H+W))$.
+ 
 
-Tham số \texttt{aq-mode=0} được truyền qua \texttt{-x265-params aq-mode=0} để tắt adaptive quantization. Cả hai stream được giải nén ra frame riêng $\bar{S}_i$ và $\bar{S}_n$, sau đó tái tạo frame ghép:
+
+% \subsection{Quy trình tạo bản đồ vùng quan tâm}
+% \label{subsec:tao-ban-do-roi}
+ 
+% PIDNet-L được huấn luyện trên tập dữ liệu Cityscapes với hai nhãn đầu ra tương ứng với vùng quan tâm và vùng ngoài vùng quan tâm. Việc gán nhãn được kế thừa từ phương pháp gốc nhằm đảm bảo so sánh công bằng giữa hai hệ thống. Cụ thể, vùng ngoài vùng quan tâm được tạo bằng cách hợp nhất ba nhóm lớp gốc của Cityscapes là công trình xây dựng bao gồm tòa nhà, tường, rào, cầu, đường hầm, thảm thực vật bao gồm cây cối và địa hình, và bầu trời. Vùng quan tâm là phần còn lại của khung hình, bao gồm đường đi, người, xe, vật cản, biển báo và các đối tượng động khác trên đường.
+ 
+% Đầu ra của PIDNet-L là bản đồ phân đoạn $S_t \in \{0, 1\}^{H \times W}$ với $H$ và $W$ là chiều cao và chiều rộng của khung hình. Giá trị một biểu thị điểm ảnh thuộc vùng quan tâm, giá trị không biểu thị điểm ảnh thuộc vùng ngoài. Từ bản đồ này, hai mặt nạ điểm ảnh được xây dựng theo công thức
+% \begin{equation}
+% \label{eq:mask-roi}
+% M_t^{ROI}(u, v) = S_t(u, v), \quad M_t^{nROI}(u, v) = 1 - S_t(u, v),
+% \end{equation}
+% với $u$ và $v$ là tọa độ điểm ảnh.
+ 
+% Trước khi áp dụng vào quá trình nén, hai mặt nạ điểm ảnh được đưa qua bộ lọc khối nhằm khớp với cấu trúc CTU của bộ mã hóa HEVC. Khác với phương pháp gốc sử dụng khối 16 nhân 16 phù hợp với macroblock của H.264, đồ án này sử dụng khối 64 nhân 64 tương ứng với kích thước CTU lớn nhất của HEVC. Quy tắc gán khối được giữ nguyên theo phương pháp gốc, nghĩa là bất kỳ khối nào có ít nhất một điểm ảnh thuộc vùng quan tâm đều được phân loại là khối quan tâm. Quy tắc này tuy có thể làm tăng nhẹ kích thước hiệu dụng của vùng quan tâm nhưng đảm bảo không có điểm ảnh nào thuộc đối tượng quan trọng bị xếp nhầm sang vùng nén mạnh.
+\subsection{Cấu hình hàm loss CCNet (baseline so sánh)}
+\label{sec:loss_ccnet}
+
+Phần này mô tả baseline CCNet dùng để so sánh với PIDNet-L, không phải mô-đun đề xuất chính. Script \texttt{CCNet/train.py} huấn luyện mạng \texttt{SegNetwork} (CCNet 4 lớp) với hai thành phần loss được cộng đơn giản, không trọng số:
 \begin{equation}
-  \bar{x}_t = \bar{S}_i + \bar{S}_n
-  \label{eq:merge}
+  \mathcal{L} \;=\; \mathcal{L}_{\mathrm{CE}} \;+\; \mathcal{L}_{\mathrm{Dice}}
+  \label{eq:ccnet_loss}
 \end{equation}
-Phép cộng này hợp lệ vì hai luồng có vùng non-zero không chồng chéo nhau (khi fill mode là zero).
 
-\subsection{Baseline truyền thống}
-
-Để so sánh công bằng, baseline single-stream được encode với CRF:
+\textbf{Soft cross-entropy} (\texttt{metrics.crossentry}) dùng nhãn one-hot:
 \begin{equation}
-  C_{\mathrm{trad}} = \left\lfloor \frac{C_{\mathrm{roi}} + C_{\mathrm{non}}}{2} \right\rceil
-  \label{eq:trad_crf}
+  \mathcal{L}_{\mathrm{CE}} = -\frac{1}{N}\sum_{i} y_i \log(\hat{y}_i + \varepsilon),
+  \qquad \varepsilon = 10^{-6}.
 \end{equation}
-Ký hiệu $\lfloor\cdot\rceil$ là làm tròn về số nguyên gần nhất. Baseline dùng toàn bộ frame gốc (không tách luồng) với cùng codec và preset.
 
-% ============================================================
-\section{Công thức và chỉ số đánh giá}
-
-\subsection{Chỉ số chất lượng tín hiệu}
-
-PSNR và SSIM tiêu chuẩn đo chất lượng trên toàn frame. SAC dùng thêm biến thể có mặt nạ để đo riêng từng vùng: $\text{PSNR}_{\mathrm{roi}}$ và $\text{PSNR}_{\mathrm{non}}$ là PSNR tính chỉ trên các pixel tương ứng với mặt nạ ROI và non-ROI.
-
-\subsection{SA-PSNR và SA-SSIM}
-
-Bài báo \cite{wang2023sac} đề xuất hai chỉ số gia trọng dựa trên tỷ lệ nén:
-\begin{align}
-  r_{\mathrm{roi}} &= \frac{C_{\mathrm{roi}}}{C_{\mathrm{roi}} + C_{\mathrm{non}}}, \quad
-  r_{\mathrm{non}} = \frac{C_{\mathrm{non}}}{C_{\mathrm{roi}} + C_{\mathrm{non}}} \label{eq:weights}\\[6pt]
-  \text{SA-PSNR} &= r_{\mathrm{non}} \cdot P_i + r_{\mathrm{roi}} \cdot P_n \label{eq:sa_psnr}\\[4pt]
-  \text{SA-SSIM} &= r_{\mathrm{non}} \cdot S_i + r_{\mathrm{roi}} \cdot S_n \label{eq:sa_ssim}
-\end{align}
-trong đó $P_i, S_i$ là PSNR/SSIM của vùng ROI và $P_n, S_n$ của vùng non-ROI. Lưu ý cross-weighting: vùng ROI (encode chất lượng cao, CRF thấp) được nhân trọng số $r_{\mathrm{non}} > 0.5$, có nghĩa là chất lượng ROI được coi trọng hơn trong metric tổng thể -- đúng với mục tiêu thiết kế của SAC.
-
-Ví dụ với $C_{\mathrm{roi}}=25$, $C_{\mathrm{non}}=32$: $r_{\mathrm{roi}} \approx 0.439$, $r_{\mathrm{non}} \approx 0.561$.
-
-\subsection{Chỉ số phân đoạn và BD-Rate}
-
-Mean Intersection over Union (mIoU) đo chất lượng phân đoạn của model khi chạy trên frame đã decode:
+\textbf{Mean Dice} (\texttt{metrics.DiceMeanLoss1}) tính riêng từng lớp $c \in \{0,\dots,3\}$ rồi lấy trung bình, smoothing $=1$:
 \begin{equation}
-  \text{mIoU} = \frac{1}{|\mathcal{C}|} \sum_{c \in \mathcal{C}} \frac{|\hat{M}_c \cap M_c|}{|\hat{M}_c \cup M_c|}
+  \mathcal{L}_{\mathrm{Dice}} = 1 - \frac{1}{C}\sum_{c=1}^{C}\frac{2\sum \hat{y}_c y_c + 1}{\sum \hat{y}_c + \sum y_c + 1}.
 \end{equation}
-BD-Rate đo phần trăm bitrate dư thừa mà phương pháp cần để đạt cùng chất lượng với anchor trên toàn bộ operating range, bằng cách tích phân theo PCHIP spline qua 4 điểm QP. BD-Rate âm là tốt (tiết kiệm bitrate); BD-Rate dương nghĩa là cần nhiều bitrate hơn.
 
-% ============================================================
-\section{Kết quả thực nghiệm}
+Tối ưu bằng Adam với cấu hình hai mức learning rate để bảo vệ trọng số ImageNet đã pretrained: phần \textit{head} (khối Reduction, hai mô-đun Criss-Cross Attention và tầng phân loại) dùng $lr_\mathrm{head} = 3\!\times\!10^{-4}$, phần \textit{backbone} ResNet-101 dùng $lr_\mathrm{bb} = 3\!\times\!10^{-5}$ (thấp hơn 10 lần). Cả hai nhóm tham số dùng chung $\beta = (0{,}9,\,0{,}999)$, weight decay $10^{-5}$, batch size $4$, huấn luyện 60 epoch với mixed-precision FP16 (\texttt{torch.cuda.amp}). IoU được tính song song chỉ để theo dõi, không tham gia gradient.
+ 
 
-\subsection{Cấu hình huấn luyện và hàm loss}
+
+
+
+\subsection{Cấu hình huấn luyện và hàm loss của PIDnet}
 \label{sec:loss}
 
-PIDNet-L (\texttt{scripts/train\_pidnet\_l\_4class.py}) được huấn luyện 60 epoch trên Cityscapes train, optimizer SGD ($lr=10^{-2}$, momentum $0{,}9$, weight\_decay $5\!\times\!10^{-4}$), batch size 4, ảnh $512\times1024$, mixed-precision AMP, gradient clip $\|\nabla\|_2 \le 10$, poly LR có warmup 5 epoch.
+PIDNet-L được huấn luyện 60 epoch trên Cityscapes train, optimizer SGD ($lr=10^{-2}$, momentum $0{,}9$, weight\_decay $5\!\times\!10^{-4}$), batch size 4, ảnh $512\times1024$, mixed-precision AMP, gradient clip $\|\nabla\|_2 \le 10$, poly LR có warmup 5 epoch.
 
 \paragraph{Hàm loss tổng hợp.} Code dùng 4 thành phần tương ứng với 3 đầu ra của PIDNet ($x_{\text{extra-p}}$ từ P-branch, $x_{\_}$ là main output, $x_{\text{extra-d}}$ từ D-branch):
 \begin{equation}
@@ -354,7 +152,7 @@ PIDNet-L (\texttt{scripts/train\_pidnet\_l\_4class.py}) được huấn luyện 
   \label{eq:total_loss}
 \end{equation}
 
-\begin{itemize}[leftmargin=1.5em]
+\begin{itemize}
   \item $\mathcal{L}_{P}$ -- \textit{P-branch CE}: cross-entropy có trọng số lớp giữa logit P (đã upsample bilinear về kích thước nhãn) và nhãn 4 lớp.
   \item $\mathcal{L}_{D}$ -- \textit{D-branch boundary BCE}: BCE có trọng số dương động giữa logit D và mặt nạ biên $G_b$ sinh từ nhãn bằng phép biến đổi hình thái với kernel $7\times7$. Trọng số dương $pw = \mathrm{clip}\bigl((1 - \bar{G}_b)/\bar{G}_b,\,1,\,20\bigr)$ trong đó $\bar{G}_b$ là tỉ lệ pixel biên của batch -- bù lại sự mất cân bằng giữa pixel biên (hiếm) và non-biên.
   \item $\mathcal{L}_{\text{main}}$ -- \textit{Main CE}: cross-entropy có trọng số lớp trên đầu ra chính, cùng dạng với $\mathcal{L}_{P}$.
@@ -364,452 +162,223 @@ PIDNet-L (\texttt{scripts/train\_pidnet\_l\_4class.py}) được huấn luyện 
 \paragraph{Trọng số lớp (median-frequency).} Trước khi train, sample ngẫu nhiên 300 ảnh từ train set, đếm tần suất pixel của mỗi lớp $f_c$, tính
 $w_c = \mathrm{median}(f)/f_c$ rồi chuẩn hóa sao cho trung bình $w_c = 1$. Trọng số này được truyền vào \texttt{F.cross\_entropy} ở cả $\mathcal{L}_P$, $\mathcal{L}_{\text{main}}$, $\mathcal{L}_{\text{BAS}}$ để bù lại việc ROI chiếm $\sim$45\% pixel còn sky/nature ít hơn nhiều.
 
-\paragraph{Augmentation.} Random horizontal flip ($p=0{,}5$), ColorJitter, và \texttt{CompressionArtifactAugmentation} ($p=0{,}7$, JPEG quality 35--90) giúp model robust với artifact codec -- yêu cầu trực tiếp của pipeline SAC.
+% \paragraph{Augmentation.} Random horizontal flip ($p=0{,}5$), ColorJitter, và \texttt{CompressionArtifactAugmentation} ($p=0{,}7$, JPEG quality 35--90) giúp model robust với artifact codec -- yêu cầu trực tiếp của pipeline SAC.
 
-\subsection{Kết quả huấn luyện PIDNet}
 
-Mô hình hội tụ tốt trên Cityscapes train:
 
-\begin{table}[H]
-\centering
-\caption{Diễn biến loss và mIoU validation trong quá trình huấn luyện PIDNet-S.}
-\label{tab:training}
-\begin{tabular}{@{}ccc@{}}
-\toprule
-\textbf{Epoch} & \textbf{Train Loss} & \textbf{Val mIoU} \\
-\midrule
- 1  & 0.8388 & 0.6576 \\
- 5  & 0.4937 & 0.7099 \\
-10  & 0.4350 & 0.7337 \\
-20  & 0.3872 & 0.7362 \\
-30  & 0.3567 & 0.7495 \\
-40  & 0.3327 & 0.7563 \\
-49  & 0.3264 & 0.7625 \\
-50  & 0.3251 & 0.7553 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Epoch 49 đạt mIoU val $= 0{,}7625$, được lưu làm \texttt{best\_pidnet\_l\_4class.pth}. Đánh giá đầy đủ trên 500 frame val (không qua pipeline nén):
-
-\begin{table}[H]
-\centering
-\caption{Hiệu năng phân đoạn PIDNet-S trên ảnh gốc (500 frame val).}
-\label{tab:seg_quality}
-\begin{tabular}{@{}lc@{}}
-\toprule
-\textbf{Chỉ số} & \textbf{Giá trị} \\
-\midrule
-mIoU tổng            & 0.8498 \\
-IoU -- ROI (class 0) & 0.9117 \\
-IoU -- Sky (class 1) & 0.8682 \\
-IoU -- Construction (class 2) & 0.7652 \\
-IoU -- Nature (class 3) & 0.8542 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Chênh lệch giữa mIoU lúc training (0{,}7625) và evaluate đầy đủ (0{,}8498) phản ánh việc validation lúc train ở chế độ AMP + augmentation và mô hình hoạt động tốt hơn ở chế độ eval không dropout.
-
-\subsection{Benchmark latency theo từng giai đoạn}
-
-\begin{table}[H]
-\centering
-\caption{Thời gian xử lý từng giai đoạn của pipeline SAC (đơn vị: ms).}
-\label{tab:latency}
-\begin{tabular}{@{}lcc@{}}
-\toprule
-\textbf{Giai đoạn} & \textbf{GPU (ms)} & \textbf{CPU (ms)} \\
-\midrule
-Tiền xử lý (preprocessing) & 12.94  & 11.62  \\
-Inference PIDNet             &  6.08  & 127.15 \\
-Tách luồng (mask split)      &  7.07  &  35.42 \\
-Encode + Decode x265         & 700.57 & 696.11 \\
-Blend (merge)                &  26.11 &  23.50 \\
-\midrule
-\textbf{Tổng}                & \textbf{979.34} & \textbf{1114.88} \\
-\textbf{FPS}                 & \textbf{1.02}   & \textbf{0.90}   \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Bước encode/decode x265 chiếm $>71\%$ tổng thời gian (700/979 ms); inference PIDNet chỉ 6 ms trên GPU. Bottleneck nằm ở codec chứ không phải phân đoạn -- GPU tăng tốc inference từ 127 ms xuống 6 ms nhưng không giúp cho encode (x265 chạy CPU).
-
-\subsection{So sánh chất lượng nén SAC vs.\ truyền thống}
-
-Với cấu hình $C_{\mathrm{roi}}=25$, $C_{\mathrm{non}}=32$, $C_{\mathrm{trad}}=28$, pipeline được chạy trên 20 frame validation. Kết quả per-frame và tóm tắt như sau:
-
-\begin{table}[H]
-\centering
-\caption{So sánh SAC vs.\ truyền thống trên 20 frame ($C_{\mathrm{roi}}=25$, $C_{\mathrm{non}}=32$).}
-\label{tab:sac_vs_trad}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-\textbf{Chỉ số} & \textbf{SAC} & \textbf{Truyền thống} & \textbf{$\Delta$ (SAC -- Trad)} \\
-\midrule
-PSNR (dB)      & 33.04  & 34.11  & $-1.07$ \\
-SSIM           & 0.8873 & 0.9009 & $-0.0136$ \\
-SA-PSNR (dB)   & 36.33  & 34.11$^*$ & $+2.21$ \\
-SA-SSIM        & 0.9477 & 0.9009$^*$ & $+0.047$ \\
-Bitrate (Mbps) & 22.30  & 13.91  & $+8.39$ \\
-\bottomrule
-\multicolumn{4}{@{}l@{}}{\footnotesize $^*$ Baseline dùng uniform CRF nên SA-PSNR $\approx$ PSNR.}
-\end{tabular}
-\end{table}
-
-PSNR toàn frame của SAC thấp hơn baseline ($-1{,}07$ dB) nhưng SA-PSNR cao hơn $+2{,}21$ dB -- đúng thiết kế: SAC hy sinh non-ROI để nâng ROI, và SA-PSNR đo lợi ích đó. Bitrate SAC cao hơn $\sim$60\% do encode hai stream riêng không tận dụng được redundancy giữa hai vùng và có overhead container.
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=0.9\linewidth, height=6.5cm,
-  xlabel={Frame index}, ylabel={PSNR (dB)},
-  legend pos=south east,
-  grid=both, grid style={line width=0.3pt, draw=gray!30},
-  xtick={1,4,7,10,13,16,19},
-  ymin=30, ymax=40,
-  legend style={font=\small},
-]
-\addplot[royalblue, thick, mark=*, mark size=1.5pt] coordinates {
-  (1,35.94)(2,35.87)(3,34.43)(4,34.98)(5,35.79)
-  (6,34.69)(7,33.69)(8,33.92)(9,33.31)(10,32.89)
-  (11,33.52)(12,33.43)(13,33.29)(14,34.53)(15,32.67)
-  (16,31.90)(17,33.13)(18,33.98)(19,34.02)(20,36.30)
-};
-\addlegendentry{PSNR Truyền thống}
-
-\addplot[crimson, thick, mark=square*, mark size=1.5pt] coordinates {
-  (1,34.53)(2,33.72)(3,33.23)(4,34.26)(5,34.64)
-  (6,33.59)(7,32.98)(8,33.46)(9,32.62)(10,32.04)
-  (11,32.16)(12,31.98)(13,32.28)(14,33.35)(15,31.27)
-  (16,30.77)(17,32.44)(18,33.09)(19,33.14)(20,35.16)
-};
-\addlegendentry{PSNR SAC}
-
-\addplot[forestgreen, thick, mark=triangle*, mark size=2pt, dashed] coordinates {
-  (1,37.83)(2,37.06)(3,36.47)(4,37.32)(5,37.72)
-  (6,36.87)(7,36.13)(8,36.55)(9,35.68)(10,35.25)
-  (11,36.00)(12,35.22)(13,35.61)(14,36.76)(15,35.10)
-  (16,34.33)(17,35.56)(18,36.31)(19,36.25)(20,38.51)
-};
-\addlegendentry{SA-PSNR SAC}
-\end{axis}
-\end{tikzpicture}
-\caption{So sánh PSNR và SA-PSNR theo từng frame. SAC thấp hơn về PSNR nhưng cao hơn đáng kể về SA-PSNR.}
-\label{fig:psnr_compare}
-\end{figure}
-
-\subsection{Phân tích RD Curve và BD-Rate (fill mode)}
-
-Để đánh giá toàn diện hơn trên nhiều operating point, RD curve được xây dựng bằng cách quét 4 giá trị QP $\{22, 27, 32, 37\}$ cho baseline và 4 cấu hình tương ứng cho SAC (QP offset $\Delta = +5$ cho non-ROI). Hình~\ref{fig:rd_curve} thể hiện Accuracy (mIoU) vs. Rate (bpp).
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=0.9\linewidth, height=7.0cm,
-  xlabel={Rate (bpp)}, ylabel={mIoU},
-  legend pos=south east,
-  grid=both, grid style={line width=0.3pt, draw=gray!30},
-  xmin=0.06, xmax=0.52,
-  ymin=0.60, ymax=0.85,
-  legend style={font=\small},
-]
-% Traditional
-\addplot[royalblue, very thick, mark=square*, mark size=2.5pt] coordinates {
-  (0.085, 0.7109)
-  (0.148, 0.7564)
-  (0.261, 0.7970)
-  (0.466, 0.8190)
-};
-\addlegendentry{Traditional x265}
-
-% SAC zero fill
-\addplot[crimson, very thick, mark=*, mark size=2.5pt] coordinates {
-  (0.076, 0.6328)
-  (0.129, 0.7150)
-  (0.223, 0.7692)
-  (0.390, 0.8012)
-};
-\addlegendentry{SAC x265 (fill=zero)}
-
-% SAC DC fill
-\addplot[forestgreen, very thick, mark=triangle*, mark size=3pt, dashed] coordinates {
-  (0.078, 0.6501)
-  (0.131, 0.7255)
-  (0.227, 0.7757)
-  (0.396, 0.8020)
-};
-\addlegendentry{SAC x265 (fill=DC)}
-
-% Labels QP
-\node[font=\tiny, royalblue] at (axis cs: 0.085, 0.714) [above] {QP37};
-\node[font=\tiny, royalblue] at (axis cs: 0.148, 0.760) [above] {QP32};
-\node[font=\tiny, royalblue] at (axis cs: 0.261, 0.801) [above] {QP27};
-\node[font=\tiny, royalblue] at (axis cs: 0.466, 0.823) [above] {QP22};
-\end{axis}
-\end{tikzpicture}
-\caption{RD Curve: mIoU vs. bits-per-pixel với 4 operating point. SAC (hai chiến lược fill) so với baseline truyền thống.}
-\label{fig:rd_curve}
-\end{figure}
-
-\begin{table}[H]
-\centering
-\caption{Dữ liệu chi tiết RD curve tại 4 operating point (fill=zero).}
-\label{tab:rd_detail_zero}
-\begin{tabular}{@{}ccccc@{}}
-\toprule
-\textbf{QP} & \multicolumn{2}{c}{\textbf{Traditional x265}} & \multicolumn{2}{c}{\textbf{SAC x265 (zero)}} \\
-\cmidrule(lr){2-3} \cmidrule(lr){4-5}
- & bpp & mIoU & bpp & mIoU \\
-\midrule
-22 & 0.4662 & 0.8190 & 0.3897 & 0.8012 \\
-27 & 0.2613 & 0.7970 & 0.2232 & 0.7692 \\
-32 & 0.1476 & 0.7564 & 0.1294 & 0.7150 \\
-37 & 0.0851 & 0.7109 & 0.0759 & 0.6328 \\
-\midrule
-\multicolumn{3}{l}{BD-Rate (SAC vs. Trad)} & \multicolumn{2}{c}{$+34.58\%$} \\
-\multicolumn{3}{l}{BD-Quality (SAC vs. Trad)} & \multicolumn{2}{c}{$-0.0257$} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-BD-Rate $= +34{,}58\%$ cho thấy SAC (zero fill) cần thêm $\sim$35\% bitrate để đạt cùng mIoU. Đây không phải hạn chế tuyệt đối mà phản ánh việc SAC tối ưu SA-PSNR chứ không phải mIoU -- model phân đoạn vẫn phụ thuộc thông tin non-ROI để dự đoán chính xác.
-
-% ============================================================
-\section{Cải tiến kiến trúc -- New Feature}
-\label{sec:new_feature}
-
-\subsection{Tổng quan kiến trúc mô-đun}
-
-Phiên bản \texttt{new\_feature/} tái cấu trúc toàn bộ code thành package Python với cấu trúc rõ ràng theo từng stage của paper:
-
-\begin{figure}[H]
-\centering
-\resizebox{\linewidth}{!}{%
-\begin{tikzpicture}[node distance=0.5cm and 0.8cm]
-  \node[block, fill=gray!10, draw=gray!50, minimum width=9cm, minimum height=0.7cm] (pkg) at (0,0) {\texttt{sac/} -- Python package};
-
-  \node[roiblock, below=0.7cm of pkg, xshift=-4cm] (seg) {\texttt{segmentation/}\\S1: inference.py\\losses.py};
-  \node[block, below=0.7cm of pkg, xshift=-1.3cm, fill=darkorange!10, draw=darkorange!60] (comp) {\texttt{compression/}\\stream\_separation.py\\two\_level.py};
-  \node[block, below=0.7cm of pkg, xshift=1.5cm, fill=purple!10, draw=purple!60] (met) {\texttt{metrics/}\\pixel\_quality.py\\sa\_metrics.py\\iou.py};
-  \node[nonroiblock, below=0.7cm of pkg, xshift=4.2cm] (eval) {\texttt{evaluation/}\\rd\_curve.py\\bd\_rate.py};
-
-  \draw[arrow] (pkg.south) -- ++(0,-0.15) -| (seg.north);
-  \draw[arrow] (pkg.south) -- ++(0,-0.15) -| (comp.north);
-  \draw[arrow] (pkg.south) -- ++(0,-0.15) -| (met.north);
-  \draw[arrow] (pkg.south) -- ++(0,-0.15) -| (eval.north);
-
-  \node[roundbox, below=1.5cm of comp, xshift=0.3cm, minimum width=5cm] (pipe) {\texttt{pipeline.py} -- SACPipeline orchestrator};
-  \draw[arrow] (seg.south) -- ++(0,-0.5) -| (pipe.north);
-  \draw[arrow] (comp.south) -- (pipe.north);
-  \draw[arrow] (met.south) -- ++(0,-0.5) -| (pipe.north);
-
-  \node[block, below=0.8cm of pipe, fill=gray!10, draw=gray!50] (cli) {\texttt{run\_sac.py}, \texttt{evaluate.py}, \texttt{rd\_curve.py} -- CLI entry points};
-  \draw[arrow] (pipe) -- (cli);
-\end{tikzpicture}%
-}
-\caption{Cấu trúc package \texttt{sac/} trong \texttt{new\_feature/}. Mỗi giai đoạn của paper tương ứng với một submodule riêng.}
-\label{fig:pkg_structure}
-\end{figure}
-
-Thiết kế tách module giúp test riêng, thay thế và mở rộng dễ -- khác biệt rõ so với script gốc 185 dòng.
-
-\subsection{Sửa lỗi AQ Mode}
-
-Phiên bản gốc không truyền \texttt{aq-mode=0}. Mặc định x265 dùng \texttt{aq-mode}=1 hoặc 2 -- encoder tự phân phối lại lượng tử hóa theo độ phức tạp cục bộ, phá vỡ giả thuyết SAC. Bản mới truyền \texttt{-x265-params aq-mode=0} để mọi pixel trong cùng stream được xử lý cùng QP, đúng với mô hình paper.
-
-\subsection{Các chiến lược Fill Mode mới}
-
-Zero fill (vùng ngoài mask $= 0$, theo paper) tạo gradient sắc nét ở biên ROI/non-ROI, khiến encoder tốn bit cho residual high-frequency vô nghĩa. \texttt{new\_feature} thử 4 chiến lược:
-\begin{itemize}[leftmargin=1.5em]
-  \item zero: Vùng ngoài $= 0$ (paper gốc). Ghép lại bằng phép cộng.
-  \item gray: Vùng ngoài $= 128$ (mid-gray). Encoder-friendly vì không tạo gradient mạnh.
-  \item dc: Vùng ngoài $=$ giá trị mean RGB của vùng tương ứng. Làm mượt biên.
-  \item inpaint: Nội suy TELEA từ vùng lân cận (\texttt{cv2.inpaint}). Mượt nhất nhưng chậm nhất.
-\end{itemize}
-
-Khi fill mode $\neq$ zero, phép cộng đơn giản (Eq.~\ref{eq:merge}) không còn đúng nữa vì vùng ngoài của mỗi stream chứa giá trị fill khác 0. Thay vào đó, decode sử dụng masked merge:
+\subsection{Luồng xử lý dữ liệu}
+\label{subsec:luong-xu-ly}
+ 
+Luồng dữ liệu trong hệ thống bắt đầu từ chuỗi khung hình gốc thu được từ camera. Gọi chuỗi khung hình đầu vào là $X = \{x_1, x_2, \ldots, x_T\}$, trong đó $x_t$ là khung hình tại thời điểm $t$. Mỗi khung hình $x_t$ trước hết được đưa qua mô hình phân đoạn để thu được bản đồ phân đoạn $S_t$. Trước khi tạo mặt nạ nén, bản đồ $S_t$ được đưa về cùng kích thước với khung hình đang mã hóa. Từ bản đồ này, hai mặt nạ nhị phân $M_t^{ROI}$ và $M_t^{nROI}$ được tạo theo nguyên tắc bù trừ:
 \begin{equation}
-  \bar{x}_t(i,j) = \begin{cases} \bar{S}_i(i,j) & \text{nếu } \hat{B}_t(i,j) = 1 \\ \bar{S}_n(i,j) & \text{nếu } \hat{B}_t(i,j) = 0 \end{cases}
-  \label{eq:masked_merge}
+\label{eq:binary-masks}
+M_t^{ROI}(u,v) = \mathbf{1}[S_t(u,v) \in \mathcal{C}_{ROI}], \quad
+M_t^{nROI}(u,v) = 1 - M_t^{ROI}(u,v),
 \end{equation}
-
-Masked merge lấy đúng pixel từ stream tương ứng với mask, tránh cộng chồng giá trị fill. ROI giữ chi tiết stream chất lượng cao, non-ROI giữ nền đã làm mượt mà không lệch màu/độ sáng -- điều kiện bắt buộc để các fill mode mới phát huy tác dụng.
-
-\subsection{Thay đổi chiến lược Decode}
-
-Bản gốc merge trực tiếp trong ffmpeg bằng \texttt{blend=all\_mode=addition}, không có frame Python trung gian. Bản mới decode mỗi stream ra PNG, rồi merge bằng \texttt{cv2.add()} hoặc \texttt{np.where()} trong Python -- cho phép (i) kiểm tra chất lượng từng stream và (ii) áp dụng masked merge (Eq.~\ref{eq:masked_merge}) -- điều mà filter blend không làm được vì không nhận mask thứ ba.
-
-\subsection{Sửa lỗi làm tròn CRF baseline}
-
-Bản gốc tính CRF baseline bằng \texttt{int((CRF\_ROI + CRF\_NON) / 2)} (truncation về 0). Bản mới dùng \texttt{int(round(\dots))}. Với $C_{\mathrm{roi}}{=}25$, $C_{\mathrm{non}}{=}32$: trung bình $28{,}5$ ra 28 (cũ) thành 29 (mới), ảnh hưởng đến tính công bằng so sánh.
-
-% ============================================================
-\section{Kết quả so sánh fill mode}
-
-\begin{table}[H]
-\centering
-\caption{So sánh hai chiến lược fill mode trên RD curve với 4 operating point (QP offset $+5$).}
-\label{tab:fillmode_compare}
-\begin{tabular}{@{}lcccc@{}}
-\toprule
-\textbf{Phương pháp} & \textbf{QP (roi/non)} & \textbf{bpp} & \textbf{mIoU} & \textbf{PSNR (dB)} \\
-\midrule
-\multirow{4}{*}{SAC fill=zero}
- & 22/27 & 0.3897 & 0.8012 & 37.83 \\
- & 27/32 & 0.2232 & 0.7692 & 36.02 \\
- & 32/37 & 0.1294 & 0.7150 & 34.13 \\
- & 37/42 & 0.0759 & 0.6328 & 32.05 \\
-\midrule
-\multirow{4}{*}{SAC fill=DC}
- & 22/27 & 0.3958 & 0.8020 & 37.92 \\
- & 27/32 & 0.2272 & 0.7757 & 36.10 \\
- & 32/37 & 0.1313 & 0.7255 & 34.21 \\
- & 37/42 & 0.0778 & 0.6501 & 32.15 \\
-\midrule
-\multirow{4}{*}{Traditional x265}
- & QP=22 & 0.4662 & 0.8190 & 38.75 \\
- & QP=27 & 0.2613 & 0.7970 & 37.00 \\
- & QP=32 & 0.1476 & 0.7564 & 35.16 \\
- & QP=37 & 0.0851 & 0.7109 & 33.26 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{table}[H]
-\centering
-\caption{BD-Rate và BD-Quality so với baseline traditional x265.}
-\label{tab:bd_results}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-\textbf{Phương pháp} & \textbf{BD-Rate (\%)} & \textbf{BD-Quality} & \textbf{Nhận xét} \\
-\midrule
-SAC fill=zero & $+34.58$ & $-0.0257$ & Kém nhất \\
-SAC fill=DC   & $+25.93$ & $-0.0192$ & Tốt hơn 8.65 điểm phần trăm \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-DC fill cải thiện rõ: BD-Rate $+34{,}58\% \to +25{,}93\%$ (tiết kiệm 8{,}65 điểm phần trăm), BD-Quality $-0{,}0257 \to -0{,}0192$. Nền mượt ở biên giúp encoder tập trung bit vào vùng có thông tin. Tuy vậy SAC vẫn tốn nhiều bit hơn baseline để đạt cùng mIoU -- vì mục tiêu của SAC là SA-PSNR (xác nhận qua $\Delta$SA-PSNR $= +2{,}21$ dB trong Bảng~\ref{tab:sac_vs_trad}), không phải mIoU.
-
-% ============================================================
-\section{Phân tích RD Curve theo vùng ROI và non-ROI}
-\label{sec:roi_analysis}
-
-PSNR toàn frame che giấu sự bất đối xứng của SAC. Phần này tính PSNR/SSIM riêng theo từng vùng trên 100 frame val.
-
-\subsection{Phương pháp đánh giá theo vùng}
-
-Sau encode-decode, $\bar{x}_t$ và $x_t$ được so sánh qua hai mặt nạ bổ sung ($\hat{B}_t$ và $1 - \hat{B}_t$). Masked PSNR chỉ tính MSE trên các pixel chọn. Quét 4 QP $\{22, 27, 32, 37\}$ cho cả traditional và SAC ($\Delta = +5$), tổng 8 điểm RD.
-
-\subsection{Bảng so sánh chi tiết 100 frame}
-
-\begin{table}[H]
-\centering
-\caption{So sánh chi tiết SAC vs. Traditional tại 4 điểm QP trên 100 frame val.}
-\label{tab:roi_detail}
-\begin{tabular}{@{}cccccccc@{}}
-\toprule
-\textbf{QP} & \textbf{Scheme} & \textbf{bpp} & \textbf{PSNR} & \textbf{PSNR\textsubscript{ROI}} & \textbf{PSNR\textsubscript{non}} & \textbf{SSIM\textsubscript{ROI}} & \textbf{mIoU} \\
-\midrule
-\multirow{2}{*}{22}
- & SAC          & 0.3853 & 37.81 & 38.99 & 36.10 & 0.9610 & 0.7534 \\
- & Traditional  & 0.4540 & 38.66 & 39.01 & 38.09 & 0.9617 & 0.7670 \\
-\midrule
-\multirow{2}{*}{27}
- & SAC          & 0.2220 & 36.02 & 37.31 & 34.19 & 0.9450 & 0.7209 \\
- & Traditional  & 0.2566 & 36.92 & 37.36 & 36.20 & 0.9463 & 0.7447 \\
-\midrule
-\multirow{2}{*}{32}
- & SAC          & 0.1297 & 34.11 & 35.53 & 32.16 & 0.9232 & 0.6746 \\
- & Traditional  & 0.1466 & 35.07 & 35.56 & 34.30 & 0.9249 & 0.7072 \\
-\midrule
-\multirow{2}{*}{37}
- & SAC          & 0.0762 & 31.99 & 33.57 & 29.87 & 0.8923 & 0.6029 \\
- & Traditional  & 0.0849 & 33.14 & 33.65 & 32.31 & 0.8958 & 0.6583 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{BD-Rate phân theo vùng}
-
-\begin{table}[H]
-\centering
-\caption{BD-Rate của SAC x265 so với Traditional x265 theo từng metric (100 frame).}
-\label{tab:bd_roi}
-\begin{tabular}{@{}lcc@{}}
-\toprule
-\textbf{Metric} & \textbf{BD-Rate (\%)} & \textbf{Nhận xét} \\
-\midrule
-PSNR (full frame)   & $+14.99$ & SAC cần nhiều bit hơn cho cùng PSNR tổng thể \\
-PSNR\textsubscript{ROI}   & $-11.38$ & SAC tiết kiệm bit cho cùng chất lượng vùng ROI \\
-PSNR\textsubscript{non}   & $+56.26$ & SAC kém hơn nhiều ở vùng non-ROI \\
-SSIM\textsubscript{ROI}   & $-8.65$  & Xác nhận lại lợi ích ROI qua chỉ số SSIM \\
-mIoU                & $+27.91$ & SAC cần nhiều bit hơn cho cùng mức phân đoạn \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{RD Curves theo vùng}
+trong đó $(u,v)$ là tọa độ điểm ảnh và $\mathcal{C}_{ROI}$ là tập các nhãn được xem là vùng quan tâm. Theo định nghĩa này, tại mỗi điểm ảnh, tổng giá trị của hai mặt nạ luôn bằng một.
+ 
+Hai mặt nạ sau đó được áp dụng lên khung hình gốc thông qua phép nhân Hadamard để tạo ra hai dòng dữ liệu là dòng vùng quan tâm $S_t^I$ và dòng ngoài vùng quan tâm $S_t^N$ theo công thức
+\begin{equation}
+\label{eq:stream-separation}
+S_t^I = M_t^{ROI} \odot x_t, \quad S_t^N = M_t^{nROI} \odot x_t,
+\end{equation}
+trong đó $\odot$ ký hiệu phép nhân từng điểm ảnh. Hai dòng này được đưa vào hai bộ mã hóa AVC/HEVC độc lập với các giá trị hệ số tốc độ không đổi CRF khác nhau, ký hiệu lần lượt là $C_{ROI}$ và $C_{nROI}$. Do giá trị CRF nhỏ hơn tương ứng với mức lượng tử hóa thấp hơn và chất lượng tái tạo cao hơn, hệ thống đặt $C_{ROI} < C_{nROI}$ nhằm ưu tiên bảo toàn thông tin tại vùng quan tâm, đồng thời nén mạnh hơn vùng nền để giảm bitrate tổng thể.
 
 \begin{figure}[H]
-\centering
-\includegraphics[width=\linewidth]{figures/rd_multi_panel.png}
-\caption{RD curves 4-panel: PSNR full frame, PSNR\textsubscript{ROI}, PSNR\textsubscript{non}, mIoU -- tại 4 điểm QP, 100 frame val. Đường đỏ (SAC) so với đường xanh (Traditional).}
-\label{fig:rd_multi_panel}
+    \centering
+    \includegraphics[width=0.9\textwidth]{chapters/c3/ma_hoa_nhi_phan.png}
+    \caption{Minh họa quá trình tạo mặt nạ nhị phân cho vùng quan tâm và ngoài vùng quan tâm.}
+    \label{fig:ma_hoa_nhi_phan}
 \end{figure}
+
+
+ 
+\subsection{Hàm mục tiêu rate-distortion mở rộng}
+\label{subsec:rd-mo-rong}
+ 
+Trong bộ mã hóa HEVC tiêu chuẩn, quá trình tối ưu hóa rate-distortion được thực hiện theo hàm mục tiêu Lagrange truyền thống đã trình bày trong Chương 2. Trong hệ thống đề xuất, do hai dòng được mã hóa độc lập với hai giá trị QP khác nhau, hàm mục tiêu hiệu dụng trên toàn khung hình có thể được viết dưới dạng
+\begin{equation}
+\label{eq:rd-extended}
+J_{total} = D_{ROI}(QP_{ROI}) + D_{nROI}(QP_{nROI}) + \lambda_{ROI} R_{ROI} + \lambda_{nROI} R_{nROI},
+\end{equation}
+trong đó $D_{ROI}$ và $D_{nROI}$ là độ méo trên hai vùng tương ứng, $R_{ROI}$ và $R_{nROI}$ là số bit tiêu tốn, còn $\lambda_{ROI}$ và $\lambda_{nROI}$ là các hệ số Lagrange phụ thuộc vào tham số QP của từng dòng. Quan hệ giữa hệ số Lagrange và QP trong HEVC được xác định theo công thức xấp xỉ $\lambda = 0,85 \cdot 2^{(QP-12)/3}$. Việc gán $QP_{ROI}$ nhỏ hơn $QP_{nROI}$ làm cho $\lambda_{ROI} < \lambda_{nROI}$, dẫn đến bộ mã hóa ưu tiên giảm độ méo cho vùng quan tâm hơn là tiết kiệm bit, đúng theo định hướng thiết kế.
+ 
+Việc phân tách hàm mục tiêu thành hai thành phần độc lập như công thức trên có ưu điểm so với cách tiếp cận điều chỉnh QP cấp CTU trong một bộ mã hóa duy nhất. Cụ thể, mỗi bộ mã hóa độc lập có thể tối ưu hóa dự đoán liên khung và biến đổi trên dòng dữ liệu thuần nhất của mình mà không bị ảnh hưởng bởi các biến đổi đột ngột về QP tại đường biên giữa hai vùng, vốn là nguyên nhân chính gây ra hiện tượng artefact khối khi sử dụng cơ chế delta QP. Từ đó ta có thể thực nghiệm trên nhiều giá trị khác nhau để cho ra kết quả tối ưu nhất.
+ 
+\subsection{Nén hai luồng bằng ffmpeg và giải nén để hợp lại }
+\label{sec:ccnet_encode}
+
+Sau khi đã tách được hai luồng theo mặt nạ ROI nhị phân $B = \mathbf{1}[\text{seg}=0]$. Mặt nạ được snap về lưới $16\times16$ bằng hàm \texttt{seg\_mask\_im\_macro} (block nào có $\geq 1$ pixel ROI thì cả block thành ROI), rồi nhân Hadamard:
+lưu thành chuỗi PNG \texttt{frame\_\%05d.png} trong hai thư mục \texttt{IA/} và \texttt{BA/}.
+
+Hàm \texttt{ffmpeg\_encode} trong \texttt{run\_smoke\_pipeline.py} encode mỗi chuỗi độc lập:
+\begin{center}\small
+\texttt{ffmpeg -framerate 30 -i frame\_\%05d.png -c:v libx265 -crf <CRF> -preset medium -pix\_fmt yuv420p -x265-params keyint=30:min-keyint=30 out.mp4}
+\end{center}
+SA-X264 dùng cặp $(C_{\mathrm{roi}}, C_{\mathrm{non}}) = (18, 27)$, SA-X265 dùng $(23, 32)$; GOP = 30 = framerate đảm bảo so sánh công bằng giữa các phương pháp.
+
+
+Sau đó \texttt{ffmpeg\_decode} giải nén hai stream ra PNG, \texttt{combine.py} duyệt từng cặp $(\bar{S}_{\mathrm{IA}}, \bar{S}_{\mathrm{BA}})$ và ghép bằng \emph{saturating add} của OpenCV:
+\begin{equation}
+  \bar{x}_t = \texttt{cv2.add}(\bar{S}_{\mathrm{IA}},\, \bar{S}_{\mathrm{BA}})
+  \label{eq:ccnet_merge}
+\end{equation}
+Phép cộng saturate clamp giá trị tại $255$, hợp lệ vì hai stream gần như không chồng pixel non-zero (zero fill ngoài mask). Cuối cùng chuyển BGR$\to$RGB và lưu kết quả lại.
+
+
+ 
+\section{Nền tảng thực nghiệm}
+\label{sec:nen-tang}
+ 
+\subsection{Môi trường phần cứng và phần mềm}
+\label{subsec:moi-truong}
+ 
+Hệ thống được triển khai trên máy chủ tính toán có GPU NVIDIA RTX 4090 (Ada Lovelace, sm\_89, 24 GB GDDR6X) thuê qua dịch vụ Runpod, bộ xử lý đa lõi và hệ điều hành Ubuntu 22.04.
+
 
 \begin{figure}[H]
-\centering
-\begin{minipage}{0.48\linewidth}
-  \centering
-  \includegraphics[width=\linewidth]{figures/rd_psnr_roi.png}
-  \caption{RD curve PSNR\textsubscript{ROI}: SAC cải thiện bitrate $-11.38\%$ (BD-Rate âm).}
-  \label{fig:rd_psnr_roi}
-\end{minipage}
-\hfill
-\begin{minipage}{0.48\linewidth}
-  \centering
-  \includegraphics[width=\linewidth]{figures/rd_psnr_non.png}
-  \caption{RD curve PSNR\textsubscript{non}: SAC kém hơn $+56.26\%$ (BD-Rate dương lớn).}
-  \label{fig:rd_psnr_non}
-\end{minipage}
+    \centering
+    \includegraphics[width=0.9\textwidth]{chapters/c3/GPU.png}
+    \caption{GPU NVIDIA RTX 4090 (kiến trúc Ada Lovelace, compute capability $\mathrm{sm\_89}$, 24 GB GDDR6X) thuê qua dịch vụ Runpod, dùng để huấn luyện cả hai mô hình CCNet 4 lớp và PIDNet-L 4 lớp cũng như chạy đánh giá toàn bộ pipeline SAC.}
+    \label{f..}
 \end{figure}
+ 
+Phần nén video sử dụng bộ công cụ FFmpeg phiên bản 4.4 với thư viện x265 phiên bản 3.5 được biên dịch hỗ trợ tăng tốc qua đa luồng. Các tham số mã hóa được điều khiển từ Python thông qua giao diện gọi tiến trình, cho phép tự động hóa toàn bộ chu trình từ phân đoạn, tách dòng, nén song song đến giải mã và đánh giá chất lượng. Các thư viện hỗ trợ bao gồm OpenCV cho xử lý ảnh, NumPy cho tính toán ma trận, scikit-image để tính SSIM, và Matplotlib cho trực quan hóa kết quả.
+ 
+ 
 
-\subsection{Phân tích kết quả}
+ 
+\section{Cấu hình tái hiện thí nghiệm}
+\label{sec:cau-hinh-tai-hien}
 
-BD-Rate theo từng metric làm rõ bản chất đánh đổi: SAC tiết kiệm 11{,}38\% bit ở ROI nhưng tốn thêm 56{,}26\% ở non-ROI -- đúng như thiết kế (CRF non-ROI cao hơn 5 đơn vị). Do non-ROI chiếm 60--70\% pixel của ảnh đường phố, PSNR toàn frame bị kéo xuống (BD-Rate $+14{,}99\%$); model phân đoạn cũng cần thông tin non-ROI nên mIoU BD-Rate $= +27{,}91\%$.
+Mục này tổng hợp các siêu tham số, lệnh chạy và đường dẫn dữ liệu cần thiết để tái hiện hoàn chỉnh hệ thống đã trình bày. Toàn bộ mã nguồn được tổ chức trong thư mục \texttt{scripts/} của đồ án; bảng~\ref{tab:script-map} ánh xạ từng khối kiến trúc sang tệp Python chịu trách nhiệm.
 
-SAC phù hợp với hệ thống chỉ cần chất lượng cao ở ROI (object detector foreground) hoặc dùng metric SA-PSNR. Với đánh giá toàn frame hay phân đoạn toàn cảnh, traditional x265 vẫn hiệu quả hơn ở cùng bitrate.
+\begin{table}[H]
+\centering
+\caption{Ánh xạ từ khối kiến trúc trong Hình~3.1 sang tệp mã nguồn.}
+\label{tab:script-map}
+\small
+\begin{tabular}{l|l|l}
+\hline
+\textbf{Khối} & \textbf{Vai trò} & \textbf{Tệp mã nguồn chính} \\
+\hline
+S1 (CCNet) & Huấn luyện CCNet 4 lớp & \texttt{scripts/new\_feature/train.py} \\
+S1 (PIDNet-L) & Huấn luyện PIDNet-L 4 lớp & \texttt{scripts/train\_pidnet\_l\_4class.py} \\
+S1 (suy diễn) & Sinh mặt nạ phân đoạn & \texttt{scripts/new\_feature/ccnet\_4class.py} \\
+S2 & Macroblock filter $16\times16$, tách hai luồng & \texttt{scripts/sac\_compression\_x265.py} (\texttt{macroblock\_align\_filter}) \\
+S3 & Nén/giải nén hai luồng & \texttt{scripts/SAC/Codes/CCNet/run\_smoke\_pipeline.py} \\
+Đánh giá RD & Vẽ đường cong rate-distortion 5 điểm & \texttt{scripts/run\_segmentation\_rd\_pipeline.py} \\
+\hline
+\end{tabular}
+\end{table}
 
-% ============================================================
-\section{Kết luận}
+\subsection{Tham số huấn luyện hai mô hình phân đoạn}
 
-\textbf{PIDNet-L (4-class):} đạt mIoU $0{,}8498$ và IoU ROI $0{,}9117$ với 36M tham số, inference 6 ms/frame -- đủ chính xác và không phải bottleneck. Hàm loss 4 thành phần ($0{,}4\mathcal{L}_P + 20\mathcal{L}_D + \mathcal{L}_{\text{main}} + \mathcal{L}_{\text{BAS}}$) kết hợp class weights median-frequency và boundary supervision giúp hội tụ tốt cho bài toán imbalance này.
+\begin{table}[H]
+\centering
+\caption{Đối chiếu cấu hình huấn luyện CCNet (baseline) và PIDNet-L (đề xuất).}
+\label{tab:train-config}
+\small
+\begin{tabular}{l|l|l}
+\hline
+\textbf{Tham số} & \textbf{CCNet ResNet-101} & \textbf{PIDNet-L} \\
+\hline
+Số lớp đầu ra & 4 (ROI, sky, construction, nature) & 4 (ROI, sky, construction, nature) \\
+Kích thước đầu vào & $1024\times 512$ (resize từ $2048\times 1024$) & $1024\times 512$ \\
+Optimizer & Adam & SGD + Nesterov \\
+Learning rate (head / backbone) & $3\!\times\!10^{-4}$ / $3\!\times\!10^{-5}$ & $10^{-2}$ (chung) \\
+Momentum / $\beta$ & $\beta = (0{,}9,\,0{,}999)$ & momentum $= 0{,}9$ \\
+Weight decay & $10^{-5}$ & $5\!\times\!10^{-4}$ \\
+Lịch học tốc & cố định & poly + warmup 5 epoch \\
+Batch size & 4 & 4 \\
+Số epoch & 60 & 60 \\
+Hàm loss & $\mathcal{L}_\mathrm{CE} + \mathcal{L}_\mathrm{Dice}$ & $0{,}4\mathcal{L}_P + 20\mathcal{L}_D + \mathcal{L}_\mathrm{main} + \mathcal{L}_\mathrm{BAS}$ \\
+Trọng số lớp & không & median-frequency trên 300 ảnh \\
+Mixed precision & AMP FP16 & AMP FP16 \\
+Gradient clip & không & $\|\nabla\|_2 \le 10$ \\
+\hline
+\end{tabular}
+\end{table}
 
-\textbf{Pipeline SAC:} SA-PSNR $+2{,}21$ dB so với baseline xác nhận thiết kế đúng, nhưng bitrate cao hơn $\sim$60\% và mIoU thấp hơn -- SAC là công cụ chuyên biệt cho task ưu tiên ROI, không phải giải pháp tổng quát.
+\subsection{Lệnh chạy chính}
 
-\textbf{Cải tiến new\_feature:} (1) thêm \texttt{aq-mode=0}, (2) decode riêng + masked merge thay cho ffmpeg blend, (3) DC fill. DC fill giảm 8{,}65 điểm phần trăm BD-Rate so với zero fill. Kiến trúc mô-đun tạo nền tảng mở rộng (inpaint, AV1/VVC, instance segmentation).
+Toàn bộ pipeline có thể được tái hiện qua bốn lệnh sau, giả định môi trường \texttt{conda} tên \texttt{sac} đã được kích hoạt theo hướng dẫn cài đặt:
 
-\textbf{Phân tích theo vùng:} BD-Rate $-11{,}38\%$ ở ROI và $+56{,}26\%$ ở non-ROI -- bằng chứng định lượng rằng SAC tối ưu đúng mục tiêu thiết kế.
+\begin{verbatim}
+# 1) Huấn luyện CCNet 4 lớp (baseline)
+python scripts/new_feature/train.py --epochs 60 --batch-size 4
 
-\begin{thebibliography}{9}
-\bibitem{wang2023sac}
-Y. Wang, P. H. Chan, và V. Donzella,
-``Semantic-Aware Video Compression for Automotive Cameras,''
-\textit{IEEE Transactions on Intelligent Vehicles}, vol. 8, no. 6, pp. 3712--3722, June 2023.
+# 2) Huấn luyện PIDNet-L 4 lớp (đề xuất)
+python scripts/train_pidnet_l_4class.py --epochs 60 --batch-size 4
 
-\bibitem{cityscapes2016}
-M. Cordts, M. Omran, S. Ramos \emph{et al.},
-``The Cityscapes Dataset for Semantic Urban Scene Understanding,''
-in \textit{Proc. CVPR}, 2016.
+# 3) Chạy pipeline SAC (CCNet) với một cặp CRF
+python scripts/sac_compression_x265.py   # mặc định CRF_ROI=23, CRF_nROI=32
 
-\bibitem{xu2023pidnet}
-J. Xu, Z. Xiong, và S. P. Bhanu,
-``PIDNet: A Real-Time Semantic Segmentation Network Inspired by PID Controllers,''
-in \textit{Proc. CVPR}, 2023.
-\end{thebibliography}
+# 4) Vẽ đường cong RD năm điểm QP {16, 19, 22, 25, 28}
+python scripts/run_segmentation_rd_pipeline.py --num-frames 20 --split val \
+       --model-path models/best_pidnet_l_4class.pth --num-classes 4
+\end{verbatim}
 
-\end{document}
+\subsection{Năm điểm vận hành QP cho đường cong rate-distortion}
+
+Để vẽ đường cong rate-distortion gồm năm điểm so sánh công bằng giữa SAC và nén truyền thống, đồ án chọn năm giá trị QP trung tâm $Q \in \{16, 19, 22, 25, 28\}$. Tại mỗi điểm, cặp $(C_\mathrm{ROI}, C_\mathrm{nROI}) = (Q-3,\,Q+3)$ được áp cho hai luồng SAC, trong khi nén truyền thống dùng $C_\mathrm{trad} = Q$ (chính là trung bình cộng của cặp). Quy ước này đảm bảo tỉ lệ nén tổng hợp gần như tương đương ở mỗi điểm, do đó chênh lệch đo được trên các thước đo SA-PSNR, SA-SSIM, mIoU và iIoU phản ánh trực tiếp lợi ích của cơ chế phân bổ chất lượng theo vùng, không phải do SAC tiêu thụ nhiều bit hơn.
+
+\begin{table}[H]
+\centering
+\caption{Năm điểm vận hành QP và cặp CRF tương ứng dùng để vẽ đường cong RD.}
+\label{tab:qp-points}
+\small
+\begin{tabular}{c|c|c|c}
+\hline
+\textbf{Điểm} & \textbf{$Q$ trung tâm} & \textbf{$C_\mathrm{ROI} = Q-3$} & \textbf{$C_\mathrm{nROI} = Q+3$} \\
+\hline
+1 & 16 & 13 & 19 \\
+2 & 19 & 16 & 22 \\
+3 & 22 & 19 & 25 \\
+4 & 25 & 22 & 28 \\
+5 & 28 & 25 & 31 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Lệnh FFmpeg và cấu hình codec}
+
+Hai dòng SAC được nén độc lập bằng \texttt{libx265} ở chế độ CRF với cùng \texttt{preset=medium}, GOP $=30$ (khớp framerate 30 fps của Cityscapes) và \texttt{pix\_fmt=yuv420p}. Lệnh minh họa cho dòng ROI tại điểm vận hành thứ ba ($C_\mathrm{ROI} = 19$):
+
+\begin{verbatim}
+ffmpeg -y -framerate 30 -i frame_%04d_roi.png -c:v libx265 -crf 19 \
+       -preset medium -pix_fmt yuv420p -x265-params keyint=30:min-keyint=30 \
+       out_roi.mp4
+\end{verbatim}
+
+Sau khi giải nén, hai dòng được ghép lại bằng phép cộng bão hòa: với pipeline CCNet dùng \texttt{cv2.add($\bar{S}_\mathrm{IA}$, $\bar{S}_\mathrm{BA}$)} trong \texttt{combine.py}, còn pipeline PIDNet-L dùng bộ lọc \texttt{blend=all\_mode=addition} của FFmpeg trong \texttt{sac\_compression\_x265.py}. Hai cách hiện thực tương đương về mặt giá trị pixel.
+
+\subsection{Đường dẫn dữ liệu Cityscapes}
+
+\begin{table}[H]
+\centering
+\caption{Đường dẫn dữ liệu Cityscapes sử dụng trong đồ án.}
+\label{tab:cityscapes-paths}
+\small
+\begin{tabular}{l|l}
+\hline
+\textbf{Dữ liệu} & \textbf{Đường dẫn tương đối} \\
+\hline
+Ảnh train & \texttt{data/gt\_4class/leftImg8bit\_trainvaltest/leftImg8bit/train} \\
+Ảnh val & \texttt{data/gt\_4class/leftImg8bit\_trainvaltest/leftImg8bit/val} \\
+Ảnh test & \texttt{data/gt\_4class/leftImg8bit\_trainvaltest/leftImg8bit/test} \\
+Nhãn 4 lớp train & \texttt{data/gt\_4class/train/*\_gtFine\_4class.png} \\
+Nhãn 4 lớp val & \texttt{data/gt\_4class/val/*\_gtFine\_4class.png} \\
+Mô hình CCNet & \texttt{models/best\_ccnet\_4class.pth} \\
+Mô hình PIDNet-L & \texttt{models/best\_pidnet\_l\_4class.pth} \\
+Kết quả thí nghiệm & \texttt{outputs/segmentation\_bd/run\_<timestamp>/} \\
+\hline
+\end{tabular}
+\end{table}
+
+Hai thành phố \textit{Ulm} và \textit{Strasbourg} được loại khỏi tập train ngay từ thời điểm đọc dữ liệu (xem \texttt{TEST\_CITIES} trong \texttt{train\_segmentation.py}) và được dùng như tập đánh giá nội bộ để đo mIoU liên tục trong quá trình phát triển mô hình. Tập \texttt{val} 500 ảnh được giữ nguyên cho đánh giá cuối cùng và vẽ đường cong RD.
+
+\section{Kết luận chương}
+\label{sec:ket-luan-c3}
+ 
+Chương 3 đã trình bày chi tiết kiến trúc và quy trình hoạt động của hệ thống mã hóa video cho thị giác máy đề xuất trong đồ án. Hệ thống kế thừa khung tổng thể của khung làm việc SAC nhưng thay thế mô-đun phân đoạn CCNet ResNet-101 bằng PIDNet-L ba nhánh I-P-D, đồng thời giữ nguyên kích thước khối lọc mặt nạ $16\times16$ của paper gốc nhằm bảo đảm so sánh công bằng giữa hai chuẩn codec H.264 và H.265. Đóng góp về phương pháp được cụ thể hóa trên ba khía cạnh: (i) bổ sung nhánh D chuyên trách phát hiện biên giúp tạo mặt nạ ROI sắc nét hơn ở ranh giới giữa vật thể quan trọng và vùng nền; (ii) giảm khoảng 20\% tham số huấn luyện và tăng khoảng 2,5 lần tốc độ suy diễn so với CCNet ResNet-101 nhờ kiến trúc song song không dùng mô-đun chú ý chữ thập; (iii) chuẩn hóa năm điểm vận hành QP $\{16, 19, 22, 25, 28\}$ với cặp CRF $(Q-3,\,Q+3)$ để vẽ đường cong rate-distortion một cách công bằng cho cả nén truyền thống và SAC. Toàn bộ pipeline phân đoạn, tách dòng, nén song song hai luồng bằng FFmpeg/libx265, giải nén và tái hợp được tự động hóa trong các kịch bản Python liệt kê ở mục~\ref{sec:cau-hinh-tai-hien}. Các kết quả thực nghiệm chi tiết được trình bày trong chương tiếp theo.

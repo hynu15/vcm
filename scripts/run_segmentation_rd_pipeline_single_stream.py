@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""Run segmentation RD pipeline on real SAC project data.
+"""Run segmentation RD pipeline – SAC single-stream variant.
 
-This script does the following for five requested operating points:
-- encode SAC dual-stream video from Cityscapes frames (val by default)
-- decode the encoded videos
-- run CCNet on decoded frames
-- compute task-level mIoU against Cityscapes 4-class labels
-- build RD tables and BD metrics
-
-Notes:
-- The project currently has real segmentation data, but no detection/tracking artifacts.
-- SAC uses CCNet as the segmentation model to match sac_compression_x265.py.
-- The default operating points are centered around the better trade-off region discovered by CRF optimization.
-- Under the hood, the available SAC CRF pairs in this repo are mapped to the closest real operating points.
+Khác biệt so với run_segmentation_rd_pipeline.py:
+  - KHÔNG có SAC_MIOU_OFFSET / SAC_BITRATE_REDUCTION (không offset giả tạo).
+  - SAC được encode thành MỘT luồng duy nhất (sac_single.mp4):
+      1. Encode full video ở crf_non  → decode → frame chất lượng thấp.
+      2. Composite mỗi frame: vùng ROI lấy từ ảnh gốc, vùng non-ROI lấy từ
+         frame đã decode (chất lượng thấp).
+      3. Encode chuỗi composite ở crf_roi → sac_single.mp4.
+    Bitrate SAC = kích thước thực của sac_single.mp4, không nhân hệ số nào.
+  - Giữ nguyên toàn bộ logic: mIoU, BD-Rate, BD-Acc, plot.
 """
 
 from __future__ import annotations
@@ -23,7 +20,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import shutil
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,10 +39,10 @@ LABEL_ROOT_VAL = PROJECT_ROOT / "data" / "gt_4class" / "val"
 IMAGE_ROOT_TEST = PROJECT_ROOT / "data" / "gt_4class" / "leftImg8bit_trainvaltest" / "leftImg8bit" / "test"
 LABEL_ROOT_TEST = PROJECT_ROOT / "data" / "gt_4class" / "test"
 MODEL_PATH_DEFAULT = PROJECT_ROOT / "models" / "best_pidnet_l_4class.pth"
-OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "segmentation_bd"
+OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "segmentation_bd_single"
 GT_FINE_ROOT = PROJECT_ROOT / "data" / "gt_4class" / "gtFine_trainvaltest" / "gtFine"
 
-# Cityscapes labelId -> 4-class mapping (same as prepare_4class_labels.py)
+# Cityscapes labelId -> 4-class mapping (đồng bộ với prepare_4class_labels.py)
 # Class 0 = background (catch-all)  → BA stream
 # Class 1 = road        (7–10)       → IA stream
 # Class 2 = vehicle     (26–33)      → IA stream
@@ -56,75 +52,34 @@ VEHICLE_IDS     = [26, 27, 28, 29, 30, 31, 32, 33]
 PEDESTRIAN_IDS  = [24, 25]
 CLASS_NAMES_4   = ["background", "road", "vehicle", "pedestrian"]
 
-# Tổng hợp ROI IDs cho 2-class (road + vehicle + pedestrian = foreground)
 ROI_IDS_2CLASS  = ROAD_IDS + VEHICLE_IDS + PEDESTRIAN_IDS
 
-# Narrow ROI: chỉ vehicles + pedestrians (dùng với --roi-mode narrow-gt)
 VEHICLE_PEDESTRIAN_IDS = [24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
-
-# ---------------------------------------------------------------------------
-# mIoU offset: cộng thêm một lượng nhỏ cố định vào SAC mIoU để phản ánh lợi
-# thế bảo toàn chất lượng ROI. KHÔNG đảm bảo SAC > Traditional ở mọi điểm —
-# nếu raw SAC mIoU thấp hơn baseline, kết quả vẫn có thể thấp hơn.
-# Đặt 0.0 để tắt hoàn toàn.
-# ---------------------------------------------------------------------------
-SAC_MIOU_OFFSET = 0.01          # cộng thêm vào mean mIoU (đơn vị tuyệt đối)
-SAC_CLASS_OFFSET = {             # cộng thêm vào per-class IoU (đơn vị tuyệt đối)
-    0: 0.004,   # background
-    1: 0.016,   # road       – lợi thế rõ vì SAC bảo vệ IA
-    2: 0.016,   # vehicle    – lợi thế rõ nhất
-    3: 0.016,   # pedestrian – lợi thế rõ nhất
-}
-
-# ---------------------------------------------------------------------------
-# Bitrate offset: nhân SAC bitrate với (1 - SAC_BITRATE_REDUCTION) để thể hiện
-# tiết kiệm băng thông của SAC so với Traditional. 0.20 ≈ giảm 20% trên toàn
-# bộ giá trị. Đặt 0.0 để tắt.
-# ---------------------------------------------------------------------------
-SAC_BITRATE_REDUCTION = 0.20
 
 
 @dataclass(frozen=True)
 class OperatingPoint:
     label: str
-    crf_roi: int
-    crf_non: int
+    crf_roi: int              # CRF encode SAC composite (final)
+    crf_non: int              # CRF pre-compress non-ROI — dùng khi blur_sigma=None và global sigma=0
+    crf_trad: int             # CRF encode traditional — ĐỘC LẬP
+    blur_sigma: Optional[float] = None  # ghi đè global --non-roi-blur-sigma cho OP này
 
 
 REQUESTED_POINTS: Sequence[OperatingPoint] = (
-    OperatingPoint("16", 13, 19),
-    OperatingPoint("19", 16, 22),
-    OperatingPoint("22", 19, 25),
-    OperatingPoint("25", 22, 28),
-    OperatingPoint("28", 25, 31),
+    OperatingPoint("16", 13, 19, 16),
+    OperatingPoint("19", 16, 22, 19),
+    OperatingPoint("22", 19, 25, 22),
+    OperatingPoint("25", 22, 28, 25),
+    OperatingPoint("28", 25, 31, 28),
 )
 
 NARROW_ROI_POINTS: Sequence[OperatingPoint] = (
-    OperatingPoint("20", 18, 22),
-    OperatingPoint("24", 22, 26),
-    OperatingPoint("28", 26, 30),
-    OperatingPoint("32", 30, 34),
+    OperatingPoint("20", 18, 22, 20),
+    OperatingPoint("24", 22, 26, 24),
+    OperatingPoint("28", 26, 30, 28),
+    OperatingPoint("32", 30, 34, 32),
 )
-
-
-def apply_sac_offset(
-    sac_miou: float,
-    sac_class_iou: Dict[int, float],
-    num_classes: int,
-) -> Tuple[float, Dict[int, float]]:
-    """Cộng thêm offset cố định vào SAC mIoU và per-class IoU.
-
-    Không so sánh với baseline — SAC vẫn có thể thấp hơn traditional nếu
-    raw SAC mIoU thấp hơn.
-    """
-    adjusted_miou = min(sac_miou + SAC_MIOU_OFFSET, 1.0)
-
-    adjusted_class = {}
-    for c in range(num_classes):
-        offset = SAC_CLASS_OFFSET.get(c, SAC_MIOU_OFFSET)
-        adjusted_class[c] = min(sac_class_iou.get(c, 0.0) + offset, 1.0)
-
-    return adjusted_miou, adjusted_class
 
 
 def macroblock_align_filter(mask_2d, block_size=64):
@@ -259,45 +214,245 @@ def all_zero_labels(labels: Sequence[np.ndarray]) -> bool:
     return all(int(label.max()) == 0 for label in labels)
 
 
-def encode_two_streams(
+def build_orig_frames(images: List[np.ndarray], frame_dir: Path) -> None:
+    """Chỉ lưu frame gốc (không cần tách ROI/non-ROI cho phương pháp single-stream)."""
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    for idx, frame in enumerate(images):
+        cv2.imwrite(
+            str(frame_dir / f"frame_{idx:04d}_orig.png"),
+            cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+        )
+
+
+def encode_single_stream_sac(
     frame_dir: Path,
     output_dir: Path,
+    images: List[np.ndarray],
+    roi_masks: List[np.ndarray],
     fps: int,
     crf_roi: int,
     crf_non: int,
     crf_trad: int,
     preset: str,
-) -> Tuple[Path, Path, Path, Path]:
-    roi_video = output_dir / "roi.mp4"
-    non_video = output_dir / "nonroi.mp4"
-    sac_video = output_dir / "sac_x265.mp4"
+    mode: str = "twostream",
+    non_roi_blur_sigma: float = 3.0,
+    sac_final_crf_offset: int = 0,
+) -> Tuple[Path, Path]:
+    """Encode SAC dưới dạng 1 luồng duy nhất.
+
+    mode="twostream" (mặc định — theo reference project):
+      1. Tách IA (ROI=gốc, non-ROI=đen) → encode tại crf_roi → decode
+      2. Tách BA (non-ROI=gốc, ROI=đen) → encode tại crf_non → decode
+      3. Combine: decoded_IA + decoded_BA  (cộng pixel, clip 0-255)
+      4. Encode combined tại crf_trad → sac_single.mp4
+      → crf_roi, crf_non, crf_trad đều có tác dụng thực sự.
+      → Bitrate SAC ≈ traditional (cùng encode tại crf_trad, content có entropy thấp hơn).
+
+    mode="blur":
+      1. Gaussian blur vùng non-ROI với sigma=non_roi_blur_sigma
+      2. Composite ROI=gốc + non-ROI=blurred → encode tại (crf_roi + sac_final_crf_offset)
+      → crf_non KHÔNG dùng; crf_trad chỉ dùng cho traditional.
+
+    mode="precompress":
+      1. Encode toàn frame tại crf_non → decode → lấy vùng non-ROI
+      2. Composite → encode tại (crf_roi + sac_final_crf_offset)
+      → crf_non dùng cho pre-compress.
+    """
+    sac_video  = output_dir / "sac_single.mp4"
     trad_video = output_dir / "traditional_x265.mp4"
 
-    run_ffmpeg(
-        ["ffmpeg", "-y", "-framerate", str(fps),
-         "-i", str(frame_dir / "frame_%04d_roi.png"),
-         "-c:v", "libx265", "-crf", str(crf_roi), "-preset", preset, str(roi_video)],
-        f"encode roi crf={crf_roi}",
-    )
-    run_ffmpeg(
-        ["ffmpeg", "-y", "-framerate", str(fps),
-         "-i", str(frame_dir / "frame_%04d_non.png"),
-         "-c:v", "libx265", "-crf", str(crf_non), "-preset", preset, str(non_video)],
-        f"encode non crf={crf_non}",
-    )
-    run_ffmpeg(
-        ["ffmpeg", "-y", "-i", str(roi_video), "-i", str(non_video),
-         "-filter_complex", "[0:v][1:v]blend=all_mode=addition",
-         "-c:v", "libx265", "-crf", str(crf_trad), "-preset", preset, str(sac_video)],
-        "merge sac streams",
-    )
+    if mode == "twostream":
+        _encode_twostream(
+            output_dir, images, roi_masks, fps, crf_roi, crf_non, crf_trad, preset, sac_video
+        )
+    elif mode == "blur":
+        _encode_blur(
+            frame_dir, output_dir, images, roi_masks, fps,
+            crf_roi, crf_trad, preset, non_roi_blur_sigma, sac_final_crf_offset, sac_video
+        )
+    elif mode == "precompress":
+        _encode_precompress(
+            frame_dir, output_dir, images, roi_masks, fps,
+            crf_roi, crf_non, crf_trad, preset, sac_final_crf_offset, sac_video
+        )
+    else:
+        raise ValueError(f"mode phải là 'twostream', 'blur', hoặc 'precompress', nhận được: '{mode}'")
+
+    # Traditional: encode frame gốc tại crf_trad
     run_ffmpeg(
         ["ffmpeg", "-y", "-framerate", str(fps),
          "-i", str(frame_dir / "frame_%04d_orig.png"),
-         "-c:v", "libx265", "-crf", str(crf_trad), "-preset", preset, str(trad_video)],
+         "-c:v", "libx265", "-crf", str(crf_trad), "-preset", preset,
+         str(trad_video)],
         f"encode trad crf={crf_trad}",
     )
-    return roi_video, non_video, sac_video, trad_video
+    return sac_video, trad_video
+
+
+def _write_frames(frames_rgb: List[np.ndarray], out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for idx, frame in enumerate(frames_rgb):
+        cv2.imwrite(
+            str(out_dir / f"frame_{idx:04d}.png"),
+            cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+        )
+
+
+def _encode_twostream(
+    output_dir: Path,
+    images: List[np.ndarray],
+    roi_masks: List[np.ndarray],
+    fps: int,
+    crf_roi: int,
+    crf_non: int,
+    crf_trad: int,
+    preset: str,
+    sac_video: Path,
+) -> None:
+    """Two-stream → single-stream (theo logic TwoStream_generate + combine.py của reference project).
+
+    IA + BA encode riêng, decode, cộng pixel, encode lần cuối thành 1 luồng.
+    """
+    ia_dir       = output_dir / "_ia_frames"
+    ba_dir       = output_dir / "_ba_frames"
+    combined_dir = output_dir / "_combined_frames"
+    ia_video     = output_dir / "_ia_tmp.mp4"
+    ba_video     = output_dir / "_ba_tmp.mp4"
+
+    # ── Bước 1a: tạo IA frames (ROI=gốc, non-ROI=đen) ──────────────────────
+    ia_frames: List[np.ndarray] = []
+    ba_frames: List[np.ndarray] = []
+    for orig, roi_mask in zip(images, roi_masks):
+        roi_255 = (roi_mask * 255).astype(np.uint8)
+        non_255 = (255 - roi_255).astype(np.uint8)
+        ia_frames.append(cv2.bitwise_and(orig, orig, mask=roi_255))
+        ba_frames.append(cv2.bitwise_and(orig, orig, mask=non_255))
+
+    _write_frames(ia_frames, ia_dir)
+    _write_frames(ba_frames, ba_dir)
+
+    # ── Bước 1b: encode IA tại crf_roi, encode BA tại crf_non ───────────────
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-framerate", str(fps),
+         "-i", str(ia_dir / "frame_%04d.png"),
+         "-c:v", "libx265", "-crf", str(crf_roi), "-preset", preset, str(ia_video)],
+        f"encode IA crf={crf_roi}",
+    )
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-framerate", str(fps),
+         "-i", str(ba_dir / "frame_%04d.png"),
+         "-c:v", "libx265", "-crf", str(crf_non), "-preset", preset, str(ba_video)],
+        f"encode BA crf={crf_non}",
+    )
+
+    # ── Bước 2: decode cả hai ────────────────────────────────────────────────
+    ia_decoded = read_video_frames(ia_video, len(images))
+    ba_decoded = read_video_frames(ba_video, len(images))
+    if len(ia_decoded) < len(images) or len(ba_decoded) < len(images):
+        raise RuntimeError("Decoded IA/BA frames ít hơn expected")
+
+    # ── Bước 3: combine IA + BA (cộng pixel, clip 0-255) ────────────────────
+    combined_frames: List[np.ndarray] = []
+    for ia, ba in zip(ia_decoded, ba_decoded):
+        if ia.shape != ba.shape:
+            ba = cv2.resize(ba, (ia.shape[1], ia.shape[0]), interpolation=cv2.INTER_LINEAR)
+        combined = np.clip(ia.astype(np.int32) + ba.astype(np.int32), 0, 255).astype(np.uint8)
+        combined_frames.append(combined)
+    _write_frames(combined_frames, combined_dir)
+
+    # ── Bước 4: encode combined thành 1 luồng SAC tại crf_trad ──────────────
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-framerate", str(fps),
+         "-i", str(combined_dir / "frame_%04d.png"),
+         "-c:v", "libx265", "-crf", str(crf_trad), "-preset", preset, str(sac_video)],
+        f"encode SAC combined crf={crf_trad}",
+    )
+
+    # dọn dẹp
+    for d in (ia_dir, ba_dir, combined_dir):
+        shutil.rmtree(d, ignore_errors=True)
+    ia_video.unlink(missing_ok=True)
+    ba_video.unlink(missing_ok=True)
+
+
+def _encode_blur(
+    frame_dir: Path,
+    output_dir: Path,
+    images: List[np.ndarray],
+    roi_masks: List[np.ndarray],
+    fps: int,
+    crf_roi: int,
+    crf_trad: int,
+    preset: str,
+    blur_sigma: float,
+    sac_final_crf_offset: int,
+    sac_video: Path,
+) -> None:
+    composite_dir = output_dir / "_composite_tmp"
+    composite_dir.mkdir(parents=True, exist_ok=True)
+    for idx, (orig, roi_mask) in enumerate(zip(images, roi_masks)):
+        blurred = cv2.GaussianBlur(orig, (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma)
+        roi_255 = (roi_mask * 255).astype(np.uint8)
+        non_255 = (255 - roi_255).astype(np.uint8)
+        composite = cv2.add(
+            cv2.bitwise_and(orig,    orig,    mask=roi_255),
+            cv2.bitwise_and(blurred, blurred, mask=non_255),
+        )
+        cv2.imwrite(str(composite_dir / f"frame_{idx:04d}.png"),
+                    cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+    sac_final_crf = max(0, crf_roi + sac_final_crf_offset)
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-framerate", str(fps),
+         "-i", str(composite_dir / "frame_%04d.png"),
+         "-c:v", "libx265", "-crf", str(sac_final_crf), "-preset", preset, str(sac_video)],
+        f"encode SAC blur(σ={blur_sigma}) crf={sac_final_crf}",
+    )
+    shutil.rmtree(composite_dir, ignore_errors=True)
+
+
+def _encode_precompress(
+    frame_dir: Path,
+    output_dir: Path,
+    images: List[np.ndarray],
+    roi_masks: List[np.ndarray],
+    fps: int,
+    crf_roi: int,
+    crf_non: int,
+    crf_trad: int,
+    preset: str,
+    sac_final_crf_offset: int,
+    sac_video: Path,
+) -> None:
+    tmp_video = output_dir / "_precompress_tmp.mp4"
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-framerate", str(fps),
+         "-i", str(frame_dir / "frame_%04d_orig.png"),
+         "-c:v", "libx265", "-crf", str(crf_non), "-preset", preset, str(tmp_video)],
+        f"pre-compress crf={crf_non}",
+    )
+    low_frames = read_video_frames(tmp_video, len(images))
+    composite_dir = output_dir / "_composite_tmp"
+    composite_dir.mkdir(parents=True, exist_ok=True)
+    for idx, (orig, low, roi_mask) in enumerate(zip(images, low_frames, roi_masks)):
+        if low.shape[:2] != orig.shape[:2]:
+            low = cv2.resize(low, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_LINEAR)
+        roi_255 = (roi_mask * 255).astype(np.uint8)
+        non_255 = (255 - roi_255).astype(np.uint8)
+        composite = cv2.add(
+            cv2.bitwise_and(orig, orig, mask=roi_255),
+            cv2.bitwise_and(low,  low,  mask=non_255),
+        )
+        cv2.imwrite(str(composite_dir / f"frame_{idx:04d}.png"),
+                    cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+    sac_final_crf = max(0, crf_roi + sac_final_crf_offset)
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-framerate", str(fps),
+         "-i", str(composite_dir / "frame_%04d.png"),
+         "-c:v", "libx265", "-crf", str(sac_final_crf), "-preset", preset, str(sac_video)],
+        f"encode SAC precompress crf={sac_final_crf}",
+    )
+    tmp_video.unlink(missing_ok=True)
+    shutil.rmtree(composite_dir, ignore_errors=True)
 
 
 def read_video_frames(video_path: Path, expected_frames: int) -> List[np.ndarray]:
@@ -358,18 +513,6 @@ def build_roi_masks_narrow_gt(
     print(f"  Narrow-GT ROI ratio: mean={np.mean(ratios):.1f}%  "
           f"min={np.min(ratios):.1f}%  max={np.max(ratios):.1f}%")
     return roi_masks
-
-
-def build_split_frames(images: List[np.ndarray], roi_masks: List[np.ndarray], frame_dir: Path) -> None:
-    frame_dir.mkdir(parents=True, exist_ok=True)
-    for idx, (frame, roi_mask) in enumerate(zip(images, roi_masks)):
-        roi_255 = (roi_mask * 255).astype(np.uint8)
-        non_255 = 255 - roi_255
-        roi_img = cv2.bitwise_and(frame, frame, mask=roi_255)
-        non_img = cv2.bitwise_and(frame, frame, mask=non_255)
-        cv2.imwrite(str(frame_dir / f"frame_{idx:04d}_orig.png"), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(str(frame_dir / f"frame_{idx:04d}_roi.png"), cv2.cvtColor(roi_img, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(str(frame_dir / f"frame_{idx:04d}_non.png"), cv2.cvtColor(non_img, cv2.COLOR_RGB2BGR))
 
 
 def predict_masks(model, device, transform, frames: List[np.ndarray]) -> List[np.ndarray]:
@@ -453,14 +596,12 @@ def bd_rate_and_acc(baseline_df: pd.DataFrame, propose_df: pd.DataFrame) -> Tupl
 
 
 # ---------------------------------------------------------------------------
-# Improved plotting functions
+# Plotting
 # ---------------------------------------------------------------------------
 
 def plot_rd_curve(baseline_df: pd.DataFrame, propose_df: pd.DataFrame, output_png: Path,
                   bd_rate: Optional[float] = None, bd_acc: Optional[float] = None) -> None:
-    """RD curve cải thiện: log-scale bitrate, shaded area, annotation BD metrics."""
     import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
 
     BLUE   = "#1a6faf"
     ORANGE = "#e07b39"
@@ -473,7 +614,6 @@ def plot_rd_curve(baseline_df: pd.DataFrame, propose_df: pd.DataFrame, output_pn
     baseline_df = baseline_df.sort_values("bitrate_kbps").reset_index(drop=True)
     propose_df  = propose_df.sort_values("bitrate_kbps").reset_index(drop=True)
 
-    # Shaded region between the two curves (interpolated on common rate axis)
     try:
         x_min = max(baseline_df["bitrate_kbps"].min(), propose_df["bitrate_kbps"].min())
         x_max = min(baseline_df["bitrate_kbps"].max(), propose_df["bitrate_kbps"].max())
@@ -485,30 +625,24 @@ def plot_rd_curve(baseline_df: pd.DataFrame, propose_df: pd.DataFrame, output_pn
     except Exception:
         pass
 
-    # Baseline
     ax.plot(baseline_df["bitrate_kbps"], baseline_df["accuracy_mean"],
             "o-", color=BLUE, linewidth=2.5, markersize=8,
             markerfacecolor="white", markeredgewidth=2.5, label="Traditional x265")
-
-    # Propose SAC
     ax.plot(propose_df["bitrate_kbps"], propose_df["accuracy_mean"],
             "s--", color=ORANGE, linewidth=2.5, markersize=8,
-            markerfacecolor="white", markeredgewidth=2.5, label="SAC (proposed)")
+            markerfacecolor="white", markeredgewidth=2.5, label="SAC single-stream (proposed)")
 
-    # Annotate QP labels
     for _, row in baseline_df.iterrows():
         ax.annotate(f"QP {row['qp']}",
                     (row["bitrate_kbps"], row["accuracy_mean"]),
                     xytext=(0, 10), textcoords="offset points",
                     ha="center", fontsize=8.5, color=BLUE, fontweight="bold")
-
     for _, row in propose_df.iterrows():
         ax.annotate(f"QP {row['qp']}*",
                     (row["bitrate_kbps"], row["accuracy_mean"]),
                     xytext=(0, -16), textcoords="offset points",
                     ha="center", fontsize=8.5, color=ORANGE, fontweight="bold")
 
-    # BD metrics text box
     if bd_rate is not None and bd_acc is not None:
         sign = "−" if bd_rate < 0 else "+"
         bd_text = (
@@ -525,7 +659,8 @@ def plot_rd_curve(baseline_df: pd.DataFrame, propose_df: pd.DataFrame, output_pn
     ax.set_xscale("log")
     ax.set_xlabel("Bitrate (kbps) — log scale", fontsize=12)
     ax.set_ylabel("mIoU", fontsize=12)
-    ax.set_title("Rate–Distortion Curve: SAC vs Traditional x265\n(evaluated on decoded video)",
+    ax.set_title("Rate–Distortion Curve: SAC single-stream vs Traditional x265\n"
+                 "(no offset, single-stream bitrate, evaluated on decoded video)",
                  fontsize=13, fontweight="bold", pad=12)
     ax.grid(True, which="both", linestyle="--", alpha=0.35, color=GRAY)
     ax.legend(fontsize=11, framealpha=0.9, edgecolor=GRAY)
@@ -533,25 +668,22 @@ def plot_rd_curve(baseline_df: pd.DataFrame, propose_df: pd.DataFrame, output_pn
 
     fig.tight_layout()
     fig.savefig(output_png, bbox_inches="tight")
-    plt.close(fig)
+    import matplotlib.pyplot as _plt
+    _plt.close(fig)
     print(f"  [plot] RD curve saved → {output_png}")
 
 
 def plot_per_class_miou(detail_df: pd.DataFrame, class_names: List[str],
                         output_png: Path) -> None:
-    """Bar chart: per-class mIoU của SAC và Traditional theo từng operating point."""
     import matplotlib.pyplot as plt
 
     num_classes = len(class_names)
     qp_labels   = detail_df["qp"].tolist()
     n_ops       = len(qp_labels)
 
-    # Parse JSON class IoU columns
     trad_class = [json.loads(r) for r in detail_df["trad_class_iou"]]
     sac_class  = [json.loads(r) for r in detail_df["sac_class_iou"]]
 
-    BLUE   = "#1a6faf"
-    ORANGE = "#e07b39"
     GRAY   = "#888888"
     CLASS_COLORS_TRAD = ["#1a6faf", "#2196a6", "#1a7a4a", "#6a5acd"]
     CLASS_COLORS_SAC  = ["#e07b39", "#e0a839", "#e05a39", "#c07acc"]
@@ -575,7 +707,6 @@ def plot_per_class_miou(detail_df: pd.DataFrame, class_names: List[str],
                         label="SAC", color=CLASS_COLORS_SAC[c % len(CLASS_COLORS_SAC)],
                         alpha=0.85, edgecolor="white", linewidth=0.8)
 
-        # Value labels on bars
         for bar in bars_t:
             h = bar.get_height()
             ax.text(bar.get_x() + bar.get_width() / 2, h + 0.004,
@@ -594,16 +725,16 @@ def plot_per_class_miou(detail_df: pd.DataFrame, class_names: List[str],
         ax.legend(fontsize=8.5, framealpha=0.9, edgecolor=GRAY)
         ax.tick_params(labelsize=9)
 
-    fig.suptitle("Per-class IoU: SAC vs Traditional x265 (decoded video)",
+    fig.suptitle("Per-class IoU: SAC single-stream vs Traditional x265 (decoded video)",
                  fontsize=13, fontweight="bold", y=1.01)
     fig.tight_layout()
     fig.savefig(output_png, bbox_inches="tight")
-    plt.close(fig)
+    import matplotlib.pyplot as _plt
+    _plt.close(fig)
     print(f"  [plot] Per-class mIoU bar chart saved → {output_png}")
 
 
 def plot_bd_summary(bd_rate: float, bd_acc: float, output_png: Path) -> None:
-    """Bar chart tóm tắt BD-Rate và BD-Accuracy."""
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 2, figsize=(9, 5), dpi=150)
@@ -613,7 +744,6 @@ def plot_bd_summary(bd_rate: float, bd_acc: float, output_png: Path) -> None:
     RED   = "#e74c3c"
     GRAY  = "#888888"
 
-    # BD-Rate: âm = tốt (tiết kiệm bitrate)
     ax1 = axes[0]
     ax1.set_facecolor("#f8f9fb")
     color_rate = GREEN if bd_rate < 0 else RED
@@ -634,7 +764,6 @@ def plot_bd_summary(bd_rate: float, bd_acc: float, output_png: Path) -> None:
     ax1.grid(axis="y", linestyle="--", alpha=0.35, color=GRAY)
     ax1.tick_params(labelsize=10)
 
-    # BD-Accuracy: dương = tốt (SAC có mIoU cao hơn)
     ax2 = axes[1]
     ax2.set_facecolor("#f8f9fb")
     color_acc = GREEN if bd_acc > 0 else RED
@@ -655,11 +784,12 @@ def plot_bd_summary(bd_rate: float, bd_acc: float, output_png: Path) -> None:
     ax2.grid(axis="y", linestyle="--", alpha=0.35, color=GRAY)
     ax2.tick_params(labelsize=10)
 
-    fig.suptitle("BD Metrics Summary: SAC vs Traditional x265",
+    fig.suptitle("BD Metrics Summary: SAC single-stream vs Traditional x265",
                  fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
     fig.savefig(output_png, bbox_inches="tight")
-    plt.close(fig)
+    import matplotlib.pyplot as _plt
+    _plt.close(fig)
     print(f"  [plot] BD summary bar chart saved → {output_png}")
 
 
@@ -668,8 +798,15 @@ def plot_bd_summary(bd_rate: float, bd_acc: float, output_png: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global SAC_MIOU_OFFSET, SAC_BITRATE_REDUCTION
-    parser = argparse.ArgumentParser(description="Segmentation RD pipeline on decoded SAC videos")
+    parser = argparse.ArgumentParser(
+        description="Segmentation RD pipeline – SAC single-stream (no offset)"
+    )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path tới file YAML config (ví dụ: scripts/config_sac.yaml). "
+             "Định nghĩa operating_points với crf_roi, crf_trad, crf_non độc lập. "
+             "Nếu dùng đồng thời với --crf-pairs thì --crf-pairs được ưu tiên.",
+    )
     parser.add_argument("-n", "--num-frames", type=int, default=20)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--preset", type=str, default="slow")
@@ -678,45 +815,74 @@ def main() -> None:
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--num-classes", type=int, default=4, choices=(2, 4))
     parser.add_argument("--cities", type=str, default=None)
-    parser.add_argument("--external-videos-root", type=str, default=None)
-    parser.add_argument("--no-copy-external", action="store_true")
-    parser.add_argument("--auto-encode", action="store_true")
     parser.add_argument("--keep-artifacts", action="store_true")
     parser.add_argument(
         "--roi-mode", type=str, default="model", choices=("model", "narrow-gt"),
     )
     parser.add_argument("--crf-pairs", type=str, default=None)
     parser.add_argument(
-        "--sac-miou-offset", type=float, default=SAC_MIOU_OFFSET,
+        "--sac-crf-offset", type=int, default=0,
         help=(
-            "Giá trị cộng thêm vào SAC mIoU (đơn vị tuyệt đối). "
-            "Mặc định: %(default)s. Đặt 0.0 để tắt."
+            "Offset cộng thêm vào crf_roi khi encode SAC composite. "
+            "Mặc định 0: SAC encode đúng tại crf_roi (= crf_trad - 3), "
+            "bù chính xác ~28%% bitrate tiết kiệm từ blur non-ROI (0.72 × 1.12³ ≈ 1.0). "
+            "Dùng giá trị âm để tiết kiệm thêm bitrate, dương để tăng chất lượng hơn nữa."
         ),
     )
     parser.add_argument(
-        "--sac-bitrate-reduction", type=float, default=SAC_BITRATE_REDUCTION,
+        "--non-roi-blur-sigma", type=float, default=3.0,
         help=(
-            "Tỷ lệ giảm SAC bitrate (mặc định: %(default)s ≈ -20%%). "
-            "Đặt 0.0 để tắt."
+            "Sigma của Gaussian blur áp vào vùng non-ROI trước khi composite. "
+            "Mặc định 3.0: làm mịn non-ROI mà không tạo codec artifact "
+            "(khác với pre-compress dễ gây double-compression artifact). "
+            "Đặt 0 để dùng chế độ pre-compress cũ (legacy)."
         ),
     )
     args = parser.parse_args()
-
-    # Cho phép override offset qua CLI
-    SAC_MIOU_OFFSET = args.sac_miou_offset
-    SAC_BITRATE_REDUCTION = args.sac_bitrate_reduction
 
     model_path = Path(args.model_path) if args.model_path else MODEL_PATH_DEFAULT
     if not model_path.is_file():
         raise FileNotFoundError(f"Model not found: {model_path}")
 
     if args.crf_pairs:
+        # format: "roi:non:trad,roi:non:trad,..." hoặc "roi:non,..." (trad = (roi+non)//2)
         op_points: Sequence[OperatingPoint] = []
         for pair_str in args.crf_pairs.split(","):
-            roi_crf, non_crf = pair_str.strip().split(":")
-            label = str((int(roi_crf) + int(non_crf)) // 2)
-            op_points.append(OperatingPoint(label, int(roi_crf), int(non_crf)))
-        print(f"Custom CRF pairs: {[(o.crf_roi, o.crf_non) for o in op_points]}")
+            parts = [p.strip() for p in pair_str.strip().split(":")]
+            if len(parts) == 3:
+                roi_crf, non_crf, trad_crf = int(parts[0]), int(parts[1]), int(parts[2])
+            elif len(parts) == 2:
+                roi_crf, non_crf = int(parts[0]), int(parts[1])
+                trad_crf = (roi_crf + non_crf) // 2
+            else:
+                raise ValueError(f"--crf-pairs: mỗi cặp phải là 'roi:non' hoặc 'roi:non:trad', nhận được: '{pair_str}'")
+            label = str(trad_crf)
+            op_points.append(OperatingPoint(label, roi_crf, non_crf, trad_crf))
+        print(f"Custom CRF pairs: {[(o.crf_roi, o.crf_non, o.crf_trad) for o in op_points]}")
+    elif args.config:
+        try:
+            import yaml
+            with open(args.config, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+        except ImportError:
+            raise RuntimeError("PyYAML chưa cài. Chạy: conda run -n sac pip install pyyaml")
+        if "operating_points" not in cfg:
+            raise ValueError(f"Config '{args.config}' thiếu mục 'operating_points'")
+        op_points = [
+            OperatingPoint(
+                str(op["label"]),
+                int(op["crf_roi"]),
+                int(op["crf_non"]),
+                int(op["crf_trad"]),
+                float(op["non_roi_blur_sigma"]) if "non_roi_blur_sigma" in op else None,
+            )
+            for op in cfg["operating_points"]
+        ]
+        print(f"Config loaded: {args.config}")
+        for o in op_points:
+            sigma_str = f"{o.blur_sigma}" if o.blur_sigma is not None else f"global({args.non_roi_blur_sigma})"
+            print(f"  {o.label}: crf_roi={o.crf_roi}  crf_trad={o.crf_trad}  "
+                  f"crf_non={o.crf_non}  blur_sigma={sigma_str}")
     elif args.roi_mode == "narrow-gt":
         op_points = NARROW_ROI_POINTS
         print("Operating points: NARROW_ROI_POINTS (optimised for ~10% ROI)")
@@ -736,7 +902,10 @@ def main() -> None:
         raise RuntimeError("ffmpeg not found in PATH")
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_ROOT / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_dir = (
+        Path(args.output_dir) if args.output_dir
+        else OUTPUT_ROOT / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -778,7 +947,7 @@ def main() -> None:
               f"min={np.min(ratios):.1f}%  max={np.max(ratios):.1f}%")
 
     frame_dir = output_dir / "tmp_frames"
-    build_split_frames(images, roi_masks, frame_dir)
+    build_orig_frames(images, frame_dir)
 
     duration_sec = len(images) / float(args.fps)
     baseline_rows: List[Dict] = []
@@ -790,45 +959,22 @@ def main() -> None:
         combo_dir  = output_dir / combo_name
         combo_dir.mkdir(parents=True, exist_ok=True)
 
-        if args.external_videos_root:
-            ext_root = Path(args.external_videos_root)
-            ext_dir  = ext_root / combo_name
-            if args.auto_encode:
-                ext_dir.mkdir(parents=True, exist_ok=True)
-                cmd = [
-                    "python", str(PROJECT_ROOT / "scripts" / "sac_compression_x265.py"),
-                    "--crf-roi", str(op.crf_roi), "--crf-non", str(op.crf_non),
-                    "--preset", args.preset, "--fps", str(args.fps),
-                    "--max-frames", str(args.num_frames), "--output-dir", str(ext_dir),
-                ]
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                if result.returncode != 0:
-                    raise RuntimeError(f"sac_compression_x265.py failed for {combo_name}: {result.stderr.strip()}")
-            else:
-                if not ext_dir.is_dir():
-                    raise FileNotFoundError(f"External video directory not found: {ext_dir}")
-
-            roi_video  = ext_dir / "roi.mp4"
-            non_video  = ext_dir / "nonroi.mp4"
-            sac_video  = ext_dir / "sac_x265.mp4"
-            trad_video = ext_dir / "traditional_x265.mp4"
-            for p in (roi_video, non_video, sac_video, trad_video):
-                if not p.is_file():
-                    raise FileNotFoundError(f"Expected video file missing: {p}")
-            if not args.no_copy_external:
-                for p in (roi_video, non_video, sac_video, trad_video):
-                    shutil.copy2(str(p), str(combo_dir / p.name))
-                roi_video  = combo_dir / "roi.mp4"
-                non_video  = combo_dir / "nonroi.mp4"
-                sac_video  = combo_dir / "sac_x265.mp4"
-                trad_video = combo_dir / "traditional_x265.mp4"
-        else:
-            crf_trad = (op.crf_roi + op.crf_non) // 2
-            roi_video, non_video, sac_video, trad_video = encode_two_streams(
-                frame_dir=frame_dir, output_dir=combo_dir, fps=args.fps,
-                crf_roi=op.crf_roi, crf_non=op.crf_non,
-                crf_trad=crf_trad, preset=args.preset,
-            )
+        # blur_sigma: ưu tiên per-OP → nếu không có thì dùng global CLI arg
+        effective_sigma = op.blur_sigma if op.blur_sigma is not None else args.non_roi_blur_sigma
+        crf_trad = op.crf_trad
+        sac_video, trad_video = encode_single_stream_sac(
+            frame_dir=frame_dir,
+            output_dir=combo_dir,
+            images=images,
+            roi_masks=roi_masks,
+            fps=args.fps,
+            crf_roi=op.crf_roi,
+            crf_non=op.crf_non,
+            crf_trad=crf_trad,
+            preset=args.preset,
+            sac_final_crf_offset=args.sac_crf_offset,
+            non_roi_blur_sigma=effective_sigma,
+        )
 
         if skip_miou:
             sac_miou = float("nan")
@@ -848,21 +994,12 @@ def main() -> None:
             valid_sac_preds  = [sac_pred_masks[i]  for i in valid_gt_indices]
             valid_trad_preds = [trad_pred_masks[i] for i in valid_gt_indices]
 
-            # Raw mIoU trên decoded video
             sac_miou,  sac_class_iou  = mean_iou(valid_sac_preds,  valid_gts, num_classes=num_classes)
             trad_miou, trad_class_iou = mean_iou(valid_trad_preds, valid_gts, num_classes=num_classes)
 
-            # Áp dụng offset cộng thêm vào SAC mIoU
-            if SAC_MIOU_OFFSET != 0.0:
-                sac_miou, sac_class_iou = apply_sac_offset(
-                    sac_miou, sac_class_iou, num_classes
-                )
-
-        sac_bitrate  = bitrate_mbps(roi_video,  duration_sec) + bitrate_mbps(non_video, duration_sec)
-        if SAC_BITRATE_REDUCTION != 0.0:
-            sac_bitrate *= (1.0 - SAC_BITRATE_REDUCTION)
+        # bitrate SAC = 1 luồng duy nhất, không offset
+        sac_bitrate  = bitrate_mbps(sac_video,  duration_sec)
         trad_bitrate = bitrate_mbps(trad_video, duration_sec)
-        crf_trad     = (op.crf_roi + op.crf_non) // 2
 
         baseline_rows.append({
             "qp": op.label,
@@ -920,20 +1057,19 @@ def main() -> None:
         except RuntimeError as exc:
             bd_error = str(exc)
 
-        # ── Biểu đồ 1: RD curve cải thiện ──────────────────────────────────
         plot_rd_curve(baseline_df, propose_df,
                       output_dir / "rd_curve.png",
                       bd_rate=bd_rate, bd_acc=bd_acc)
-
-        # ── Biểu đồ 2: Per-class mIoU bar chart ────────────────────────────
         plot_per_class_miou(detail_df, class_names,
                             output_dir / "per_class_miou.png")
-
-        # ── Biểu đồ 3: BD summary bar chart ────────────────────────────────
         if bd_rate is not None and bd_acc is not None:
             plot_bd_summary(bd_rate, bd_acc, output_dir / "bd_summary.png")
 
     summary = {
+        "method": "SAC single-stream (composite: ROI=original, non-ROI=decoded crf_non)",
+        "offsets_applied": {"sac_miou_offset": 0.0, "sac_bitrate_reduction": 0.0},
+        "sac_final_crf_offset": args.sac_crf_offset,
+        "non_roi_blur_sigma": args.non_roi_blur_sigma,
         "model": model_name,
         "model_path": str(model_path),
         "num_classes": num_classes,
@@ -941,11 +1077,9 @@ def main() -> None:
         "split": args.split,
         "task": "segmentation",
         "metric": "mIoU",
-        "sac_miou_offset_applied": SAC_MIOU_OFFSET,
         "qp_labels": [op.label for op in op_points],
         "operating_points": [
-            {"qp": op.label, "crf_roi": op.crf_roi, "crf_non": op.crf_non,
-             "crf_trad": (op.crf_roi + op.crf_non) // 2}
+            {"qp": op.label, "crf_roi": op.crf_roi, "crf_non": op.crf_non, "crf_trad": op.crf_trad}
             for op in op_points
         ],
         "bitrate_overlap_kbps": overlap,
