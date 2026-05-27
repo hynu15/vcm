@@ -104,10 +104,11 @@ class OperatingPoint(NamedTuple):
 
 
 OPERATING_POINTS: List[OperatingPoint] = [
-    OperatingPoint("22", 19, 26),
-    OperatingPoint("27", 24, 31),
-    OperatingPoint("32", 29, 36),
-    OperatingPoint("37", 34, 41),
+    OperatingPoint("22", 19, 25),
+    OperatingPoint("25", 22, 28),
+    OperatingPoint("28", 25, 31),
+    OperatingPoint("31", 28, 34),
+    OperatingPoint("34", 31, 37),
 ]
 
 # (display_name, ffmpeg_codec, is_sac)

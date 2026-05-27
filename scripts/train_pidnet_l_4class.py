@@ -1,7 +1,7 @@
 # ------------------------------------------------------------------------------
 # PIDNet-L training script for 4-class semantic segmentation on Cityscapes.
 #
-# Classes: 0=ROI, 1=sky, 2=construction, 3=nature
+# Classes: 0=background, 1=road, 2=vehicle, 3=pedestrian
 # Prepare labels first: python prepare_4class_labels.py
 #
 # Architecture identical to train_pidnet_l.py (Xu et al., CVPR 2023).
@@ -39,7 +39,7 @@ from train_pidnet_l import (
 NUM_CLASSES = 4
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
-CLASS_NAMES = ['ROI', 'sky', 'construction', 'nature']
+CLASS_NAMES = ['background', 'road', 'vehicle', 'pedestrian']
 
 
 # ==============================================================================
@@ -49,7 +49,7 @@ CLASS_NAMES = ['ROI', 'sky', 'construction', 'nature']
 def compute_class_weights(dataset, num_classes, num_samples=300, device='cpu'):
     """Median-frequency class weights từ subset ngẫu nhiên của dataset.
 
-    Class hiếm (sky, nature) nhận weight cao hơn để chống imbalance.
+    Class hiếm (vehicle, pedestrian) nhận weight cao hơn để chống imbalance.
     Dùng median-frequency balancing: weight_c = median(freq) / freq_c.
     """
     counts = np.zeros(num_classes, dtype=np.float64)
@@ -112,7 +112,7 @@ def train(args):
     device_name = (torch.cuda.get_device_name(0)
                    if torch.cuda.is_available() else 'CPU')
     print(f"Device: {device} - {device_name}")
-    print(f"Num classes: {NUM_CLASSES}  (0=ROI, 1=sky, 2=construction, 3=nature)")
+    print(f"Num classes: {NUM_CLASSES}  (0=background, 1=road, 2=vehicle, 3=pedestrian)")
 
     image_train_dir = os.path.join(
         PROJECT_ROOT, "data", "gt_4class",
@@ -160,7 +160,7 @@ def train(args):
 
     print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
 
-    # Compute class weights để chống imbalance (class 0 ROI thường chiếm ~45%)
+    # Compute class weights để chống imbalance (road+vehicle+pedestrian < background)
     if args.class_weights:
         print("Computing class weights...")
         class_weights = compute_class_weights(
@@ -216,7 +216,7 @@ def train(args):
         writer.writerow([
             'epoch', 'mean_iou', 'best_miou_so_far', 'is_best',
             'loss_l0', 'loss_l1', 'loss_l2', 'loss_l3', 'total_loss',
-            'iou_ROI', 'iou_sky', 'iou_construction', 'iou_nature',
+            'iou_background', 'iou_road', 'iou_vehicle', 'iou_pedestrian',
         ])
 
     best_miou  = 0.0
@@ -393,7 +393,7 @@ def train(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Train PIDNet-L for 4-class segmentation (ROI/sky/construction/nature)")
+        description="Train PIDNet-L for 4-class segmentation (background/road/vehicle/pedestrian)")
     parser.add_argument('--epochs',     type=int,   default=60)
     parser.add_argument('--batch_size', type=int,   default=4)
     parser.add_argument('--lr',         type=float, default=1e-2)

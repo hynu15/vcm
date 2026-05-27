@@ -195,10 +195,17 @@ if __name__ == "__main__":
         writer = csv.writer(f)
         writer.writerow(['epoch', 'mean_iou', 'best_miou_so_far', 'is_best', 'model_name'])
 
-    def ce_dice_loss(pred, target):
-        """CE + Dice loss cho N class."""
+    def extract_main_logits(outputs, target_hw):
+        """PIDNet trả về tuple (x_extra_p, x_, x_extra_d); lấy x_ và upsample."""
+        out = outputs[1] if isinstance(outputs, (list, tuple)) else outputs
+        if out.shape[-2:] != target_hw:
+            out = F.interpolate(out, size=target_hw, mode='bilinear', align_corners=False)
+        return out
+
+    def ce_dice_loss(logits, target):
+        """CE + Dice loss cho N class. logits đã ở đúng kích thước target."""
         with torch.amp.autocast('cuda', enabled=False):
-            pred_fp32 = pred.float()
+            pred_fp32 = logits.float()
             ce = nn.CrossEntropyLoss()(pred_fp32, target)
             target_onehot = F.one_hot(target, num_classes=NUM_CLASSES).permute(0, 3, 1, 2).float()
             pred_soft = F.softmax(pred_fp32, dim=1)
@@ -220,7 +227,8 @@ if __name__ == "__main__":
 
             with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
                 outputs = model(images)
-                loss = ce_dice_loss(outputs, labels)
+                logits = extract_main_logits(outputs, labels.shape[-2:])
+                loss = ce_dice_loss(logits, labels)
 
             if not torch.isfinite(loss):
                 optimizer.zero_grad(set_to_none=True)
@@ -238,7 +246,8 @@ if __name__ == "__main__":
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
                 outputs = model(images)
-                pred = torch.argmax(outputs, dim=1)
+                logits = extract_main_logits(outputs, labels.shape[-2:])
+                pred = torch.argmax(logits, dim=1)
                 for p, t in zip(pred, labels):
                     iou_per_class = []
                     for c in range(NUM_CLASSES):
