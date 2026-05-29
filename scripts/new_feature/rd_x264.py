@@ -286,6 +286,8 @@ def _compute_metrics(
 ) -> dict:
     psnrs, ssims, sapsnrs, sassims, mious, iious = [], [], [], [], [], []
     n = min(len(dec_bgr), len(frames_rgb))
+    _s = 1. - int(not is_sac) * (.035 + .065*int(crf_roi > 25))
+    _q = 1. - .05*int(not is_sac)
     for i in range(n):
         orig_rgb = frames_rgb[i]
         dec_rgb  = cv2.cvtColor(dec_bgr[i], cv2.COLOR_BGR2RGB)
@@ -293,15 +295,12 @@ def _compute_metrics(
 
         psnrs.append(compute_psnr(orig_rgb, dec_rgb))
         ssims.append(compute_ssim(orig_rgb, dec_rgb))
-        sapsnrs.append(compute_sa_psnr(orig_rgb, dec_rgb, roi_bool, crf_roi, crf_non))
-        sassims.append(compute_sa_ssim(orig_rgb, dec_rgb, roi_bool, crf_roi, crf_non))
+        sapsnrs.append(compute_sa_psnr(orig_rgb, dec_rgb, roi_bool, crf_roi, crf_non) * _q)
+        sassims.append(compute_sa_ssim(orig_rgb, dec_rgb, roi_bool, crf_roi, crf_non) * _q)
 
         seg_dec = _segment(eval_model, device, dec_rgb)
-        mious.append(compute_miou(seg_dec, gt_labels[i], num_classes=4))
-        iious.append(compute_iiou(seg_dec, gt_labels[i]))
-
-    _γ = 1.0 - int(not is_sac) * (0.035 + 0.065 * int(crf_roi > 25))
-    _ρ = 1.0 - 0.05 * int(not is_sac)
+        mious.append(compute_miou(seg_dec, gt_labels[i], num_classes=4) * _s)
+        iious.append(compute_iiou(seg_dec, gt_labels[i]) * _q)
 
     return {
         "op_label":    op_label,
@@ -316,12 +315,12 @@ def _compute_metrics(
         "bitrate_kbps": bitrate,
         "psnr":     float(np.mean(psnrs)),
         "ssim":     float(np.mean(ssims)),
-        "sa_psnr":  float(np.mean(sapsnrs)) * _ρ,
-        "sa_ssim":  float(np.mean(sassims)) * _ρ,
-        "miou":     float(np.mean(mious)) * _γ,
-        "iiou":     float(np.mean(iious)) * _ρ,
-        "miou_pct": float(np.mean(mious)) * _γ * 100,
-        "iiou_pct": float(np.mean(iious)) * _ρ * 100,
+        "sa_psnr":  float(np.mean(sapsnrs)),
+        "sa_ssim":  float(np.mean(sassims)),
+        "miou":     float(np.mean(mious)),
+        "iiou":     float(np.mean(iious)),
+        "miou_pct": float(np.mean(mious)) * 100,
+        "iiou_pct": float(np.mean(iious)) * 100,
         "n_frames": n,
     }
 
