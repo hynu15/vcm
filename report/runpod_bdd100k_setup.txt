@@ -1,0 +1,230 @@
+================================================================================
+HƯỚNG DẪN CHUYỂN BDD100K LÊN RUNPOD (instance mới, sạch)
+================================================================================
+Ngày: 2026-05-28
+
+MỤC TIÊU
+---------
+1. Gửi archive.zip lên RunPod qua rsync
+2. Giải nén
+3. Gửi 2 script xử lý data lên RunPod
+4. Chia lại data train/val/test  (resplit_bdd.py)
+5. Chuẩn bị nhãn 4-class         (prepare_bdd_labels.py)
+
+KẾT QUẢ SAU KHI CHẠY XONG
+---------------------------
+/workspace/data/
+  archive/bdd100k_seg/bdd100k/seg/
+    images/
+      train/   (6400 anh)
+      val/     ( 800 anh)
+      test/    ( 800 anh, CO nhan)
+    labels/
+      train/   (6400 nhan goc)
+      val/     ( 800 nhan goc)
+      test/    ( 800 nhan goc)
+  gt_4class_bdd/
+    train/     (6400 nhan 4-class da convert)
+    val/       ( 800 nhan 4-class da convert)
+    test/      ( 800 nhan 4-class da convert)
+
+THÔNG TIN KẾT NỐI
+------------------
+  RUNPOD_HOST = 69.30.85.171
+  RUNPOD_PORT = 22126
+  SSH_KEY     = ~/.ssh/id_ed25519
+
+  SSH vao RunPod:
+    ssh root@69.30.85.171 -p 22126 -i ~/.ssh/id_ed25519
+
+
+================================================================================
+BƯỚC 1 — Gửi archive.zip lên RunPod
+================================================================================
+
+Chạy trên terminal LOCAL (không SSH):
+
+    rsync -avz --progress \
+      -e "ssh -i ~/.ssh/id_ed25519 -p 22126" \
+      /home/huy/sac_project/archive.zip \
+      root@69.30.85.171:/workspace/data/
+
+Nếu bị ngắt giữa chừng, chạy lại lệnh trên — rsync tự tiếp tục từ chỗ dở.
+
+Kiểm tra file đã tới (SSH vào RunPod rồi chạy):
+
+    ls -lh /workspace/data/archive.zip
+
+
+================================================================================
+BƯỚC 2 — Giải nén trên RunPod
+================================================================================
+
+Chạy trên terminal RUNPOD:
+
+    mkdir -p /workspace/data
+    cd /workspace/data
+    unzip archive.zip -d archive/
+
+    # Kiem tra cau truc
+    ls /workspace/data/archive/
+    # Mong doi: bdd100k/  bdd100k_labels_release/  bdd100k_seg/
+
+    find /workspace/data/archive/bdd100k_seg -type d | head -20
+    # Mong doi thay: .../bdd100k/seg/images/  va  .../bdd100k/seg/labels/
+
+Nếu máy không có unzip:
+
+    python3 -c "
+    import zipfile
+    with zipfile.ZipFile('/workspace/data/archive.zip') as z:
+        z.extractall('/workspace/data/archive/')
+    print('Xong')
+    "
+
+
+================================================================================
+BƯỚC 3 — Gửi script xử lý data lên RunPod
+================================================================================
+
+Chỉ cần gửi 2 file script (chạy trên LOCAL):
+
+    rsync -avz --progress \
+      -e "ssh -i ~/.ssh/id_ed25519 -p 22126" \
+      /home/huy/sac_project/scripts/resplit_bdd.py \
+      /home/huy/sac_project/scripts/prepare_bdd_labels.py \
+      root@69.30.85.171:/workspace/scripts/
+
+Kiểm tra đã lên chưa (trên RUNPOD):
+
+    ls /workspace/scripts/
+    # Phai thay: resplit_bdd.py  prepare_bdd_labels.py
+
+
+================================================================================
+BƯỚC 4 — Chia lại data train/val/test  (resplit_bdd.py)
+================================================================================
+
+BDD100K gốc có images/test/ 2000 ảnh KHÔNG có nhãn → xóa và tạo lại từ
+train + val có nhãn.
+
+--- Bước 4a: Xem trước (dry-run, chưa thay đổi gì) ---
+
+    python3 /workspace/scripts/resplit_bdd.py \
+      --seg-root /workspace/data/archive/bdd100k_seg/bdd100k/seg \
+      --dry-run
+
+Kiểm tra output in ra:
+  images/test/  : 2000 anh (khong co nhan -> se xoa)
+  images/train/ : 7000 anh | labels/train/ : 7000 nhan
+  images/val/   : 1000 anh | labels/val/   : 1000 nhan
+
+Nếu số lượng khớp -> chạy bước tiếp.
+
+--- Bước 4b: Chạy thật ---
+
+    python3 /workspace/scripts/resplit_bdd.py \
+      --seg-root /workspace/data/archive/bdd100k_seg/bdd100k/seg
+
+Kết quả đúng:
+  train :  6400 anh | 6400 nhan  ✓
+  val   :   800 anh |  800 nhan  ✓
+  test  :   800 anh |  800 nhan  ✓
+
+Kiểm tra:
+
+    ls /workspace/data/archive/bdd100k_seg/bdd100k/seg/images/
+    # Phai thay: train  val  test
+
+    ls /workspace/data/archive/bdd100k_seg/bdd100k/seg/images/test/ | wc -l
+    ls /workspace/data/archive/bdd100k_seg/bdd100k/seg/labels/test/ | wc -l
+    # Ca hai phai ra: 800
+
+
+================================================================================
+BƯỚC 5 — Chuẩn bị nhãn 4-class  (prepare_bdd_labels.py)
+================================================================================
+
+Nếu thiếu thư viện, cài trước:
+
+    pip install numpy pillow tqdm
+
+Mapping BDD100K -> 4 class:
+  0 = ROI          (road, sidewalk, person, xe cac loai, ...)
+  1 = sky          (BDD ID 10)
+  2 = construction (BDD ID 2,3,4,5: building/wall/fence/pole)
+  3 = nature       (BDD ID 8,9: vegetation/terrain)
+  255 = ignore
+
+--- Bước 5a: Dry-run (kiểm tra cấu trúc, chưa ghi file) ---
+
+    python3 /workspace/scripts/prepare_bdd_labels.py \
+      --data-root /workspace/data/archive \
+      --out-root  /workspace/data/gt_4class_bdd \
+      --dry-run
+
+Xác nhận thấy dòng:
+  "Label root : .../bdd100k_seg/bdd100k/seg/labels"
+
+--- Bước 5b: Chạy convert thật (cả 3 split) ---
+
+    python3 /workspace/scripts/prepare_bdd_labels.py \
+      --data-root /workspace/data/archive \
+      --out-root  /workspace/data/gt_4class_bdd \
+      --splits train val test
+
+Kết quả đúng: mỗi split in  "unique=[0, 1, 2, 3, 255]  OK"
+
+Kiểm tra:
+
+    ls /workspace/data/gt_4class_bdd/
+    # Phai co: train/  val/  test/
+
+    ls /workspace/data/gt_4class_bdd/train/ | wc -l   # 6400
+    ls /workspace/data/gt_4class_bdd/val/   | wc -l   #  800
+    ls /workspace/data/gt_4class_bdd/test/  | wc -l   #  800
+
+
+================================================================================
+XỬ LÝ LỖI THƯỜNG GẶP
+================================================================================
+
+Lỗi: "seg-root khong ton tai" (resplit_bdd.py)
+  -> Kiem tra dung duong dan sau khi giai nen:
+     find /workspace/data/archive -name "seg" -type d
+  -> Truyen dung --seg-root theo ket qua tim duoc
+
+Lỗi: "Khong tim thay thu muc label PNG" (prepare_bdd_labels.py)
+  -> Chay lai voi --dry-run de xem cau truc in ra
+  -> Chay: find /workspace/data/archive/bdd100k_seg -name "*.png" | head -5
+     de xac nhan duong dan nhan
+
+Lỗi: ModuleNotFoundError (numpy / PIL)
+  -> pip install numpy pillow tqdm
+
+Lỗi: unzip: command not found
+  -> Dung Python:
+     python3 -c "import zipfile; zipfile.ZipFile('/workspace/data/archive.zip').extractall('/workspace/data/archive/')"
+
+
+================================================================================
+TÓM TẮT NHANH — copy-paste theo thứ tự
+================================================================================
+
+[LOCAL] Gui zip:
+  rsync -avz --progress -e "ssh -i <SSH_KEY> -p <RUNPOD_PORT>" /home/huy/sac_project/archive.zip root@69.30.85.171:/workspace/data/
+
+[RUNPOD] Giai nen:
+  cd /workspace/data && unzip archive.zip -d archive/
+
+[LOCAL] Gui scripts:
+  rsync -avz --progress -e "ssh -i <SSH_KEY> -p <RUNPOD_PORT>" /home/huy/sac_project/scripts/resplit_bdd.py /home/huy/sac_project/scripts/prepare_bdd_labels.py root@69.30.85.171:/workspace/scripts/
+
+[RUNPOD] Chia lai data:
+  python3 /workspace/scripts/resplit_bdd.py --seg-root /workspace/data/archive/bdd100k_seg/bdd100k/seg --dry-run
+  python3 /workspace/scripts/resplit_bdd.py --seg-root /workspace/data/archive/bdd100k_seg/bdd100k/seg
+
+[RUNPOD] Chuan bi nhan:
+  python3 /workspace/scripts/prepare_bdd_labels.py --data-root /workspace/data/archive --out-root /workspace/data/gt_4class_bdd --splits train val test
+
+================================================================================

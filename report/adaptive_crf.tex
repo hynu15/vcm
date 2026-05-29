@@ -1,0 +1,81 @@
+\subsection{Chiến lược điều khiển CRF thích nghi theo tỷ lệ ROI (RA-CRF)}
+\label{subsec:ra-crf}
+
+Pipeline SAC cơ bản sử dụng một cặp CRF cố định $(C_{ROI}, C_{nROI})$ cho toàn bộ chuỗi video. Cách thiết lập này đơn giản nhưng chưa xét đến sự thay đổi của nội dung giữa các đoạn video. Khi tỷ lệ vùng ROI nhỏ, có thể ưu tiên mạnh hơn cho ROI mà không làm tăng bitrate quá nhiều. Ngược lại, khi ROI chiếm phần lớn khung hình, việc giữ $C_{ROI}$ quá thấp sẽ làm tăng bitrate đáng kể vì phần lớn diện tích ảnh được mã hóa ở chất lượng cao.
+
+Vì vậy, đồ án đề xuất cơ chế RA-CRF (\textit{ROI-Ratio Adaptive CRF Control}) để điều chỉnh cặp CRF theo tỷ lệ ROI trung bình của từng GOP. Cơ chế này không thay đổi mô hình phân đoạn mà chỉ thay đổi tham số mã hóa dựa trên mặt nạ ROI đã có.
+
+\paragraph{Tính tỷ lệ ROI trung bình theo GOP.}
+Với mỗi khung hình $t$, mặt nạ ROI $M_t^{ROI}$ thu được từ PIDNet-L đã được lượng tử hóa theo khối $16\times16$. Tỷ lệ pixel thuộc ROI trong khung hình được tính như sau:
+\begin{equation}
+  \rho_t = \frac{\text{số pixel ROI trong khung hình } t}{H \times W},
+  \label{eq:rho_t}
+\end{equation}
+trong đó $H$ và $W$ lần lượt là chiều cao và chiều rộng của khung hình.
+
+Trong pipeline thực nghiệm, video được mã hóa theo GOP có độ dài 30 khung hình. Do đó, tỷ lệ ROI được lấy trung bình trên từng GOP:
+\begin{equation}
+  \rho_q = \frac{1}{|\mathcal{T}_q|}\sum_{t\in\mathcal{T}_q}\rho_t,
+  \label{eq:rho_gop}
+\end{equation}
+trong đó $\mathcal{T}_q$ là tập các khung hình thuộc GOP thứ $q$.
+
+Việc điều chỉnh CRF theo GOP được chọn thay vì theo từng khung hình vì hai lý do. Thứ nhất, tỷ lệ ROI thường thay đổi chậm giữa các khung hình liên tiếp, nên lấy trung bình theo GOP giúp giá trị điều khiển ổn định hơn. Thứ hai, thay đổi CRF liên tục theo từng khung có thể gây dao động chất lượng giữa các frame và làm pipeline mã hóa khó kiểm soát hơn. Vì vậy, điều chỉnh tại mức GOP là lựa chọn đơn giản và phù hợp với cách triển khai bằng \texttt{ffmpeg}.
+
+\paragraph{Luật chọn độ lệch CRF theo tỷ lệ ROI.}
+Thay vì xây dựng một hàm điều khiển liên tục, đồ án sử dụng luật rời rạc ba mức. Gọi $\Delta_q$ là độ lệch một phía quanh CRF cơ sở $C_{\text{base}}$. Khi đó cặp CRF cho GOP thứ $q$ được xác định bởi:
+\begin{equation}
+  C^{ROI}_q = C_{\text{base}} - \Delta_q,\qquad
+  C^{nROI}_q = C_{\text{base}} + \Delta_q.
+  \label{eq:racrf-pair}
+\end{equation}
+
+\begin{table}[H]
+\centering
+\caption{Luật chọn độ lệch CRF theo tỷ lệ ROI trung bình $\rho_q$ của GOP.}
+\label{tab:ra-crf-rule}
+\small
+\begin{tabular}{p{0.28\textwidth}c p{0.40\textwidth}}
+\toprule
+\textbf{Tỷ lệ ROI trung bình $\rho_q$} & $\boldsymbol{\Delta_q}$ & \textbf{Ý nghĩa} \\
+\midrule
+$\rho_q < 0{,}30$              & 5 & ROI nhỏ, có thể ưu tiên mạnh hơn cho vùng quan trọng \\
+$0{,}30 \leq \rho_q < 0{,}60$  & 3 & ROI trung bình, giữ cấu hình cân bằng \\
+$\rho_q \geq 0{,}60$           & 2 & ROI lớn, giảm độ lệch CRF để hạn chế tăng bitrate \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Khi $\rho_q$ nhỏ, ROI chỉ chiếm một phần nhỏ của khung hình. Do đó, giảm $C_{ROI}$ để tăng chất lượng vùng quan trọng thường không làm tăng bitrate tổng thể quá nhiều. Khi $\rho_q$ lớn, ROI chiếm phần lớn diện tích ảnh; nếu tiếp tục dùng $C_{ROI}$ thấp, bitrate sẽ tăng rõ rệt. Trong trường hợp này, việc giảm $\Delta_q$ giúp thu hẹp khoảng cách chất lượng giữa hai vùng, từ đó hạn chế bitrate nhưng vẫn duy trì ưu tiên cho ROI.
+
+\begin{table}[H]
+\centering
+\caption{Ví dụ áp dụng luật RA-CRF với $C_{\text{base}}=22$.}
+\label{tab:ra-crf-example}
+\small
+\begin{tabular}{cccc}
+\toprule
+$\boldsymbol{\rho_q}$ & $\boldsymbol{\Delta_q}$ & $\boldsymbol{C^{ROI}_q}$ & $\boldsymbol{C^{nROI}_q}$ \\
+\midrule
+0,25 & 5 & 17 & 27 \\
+0,43 & 3 & 19 & 25 \\
+0,62 & 2 & 20 & 24 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Với $C_{\text{base}}=22$, cấu hình cố định thường dùng là $(19,25)$, tương ứng với $\Delta_q=3$. Nếu tỷ lệ ROI lớn, RA-CRF chuyển sang cặp $(20,24)$ để giảm mức ưu tiên quá mạnh cho ROI. Nếu tỷ lệ ROI nhỏ, RA-CRF dùng cặp $(17,27)$ để tăng chất lượng cho vùng quan trọng.
+
+\paragraph{Quy trình mã hóa GOP-adaptive.}
+Do tham số \texttt{-crf} của \texttt{ffmpeg} thường được áp dụng cho toàn bộ một lần mã hóa, đồ án chia chuỗi video thành các đoạn 30 khung hình. Mỗi đoạn được mã hóa độc lập với cặp CRF riêng. Quy trình gồm các bước sau:
+
+\begin{enumerate}
+  \item Tính tỷ lệ ROI trung bình $\rho_q$ của GOP từ mặt nạ PIDNet-L.
+  \item Chọn $\Delta_q$ theo Bảng~\ref{tab:ra-crf-rule}.
+  \item Tính cặp $(C^{ROI}_q, C^{nROI}_q)$ theo công thức~\eqref{eq:racrf-pair}.
+  \item Mã hóa hai luồng ROI và non-ROI bằng \texttt{ffmpeg} với cặp CRF tương ứng.
+  \item Giải mã hai luồng và ghép lại để thu được khung hình tái tạo.
+  \item Nối các đoạn GOP theo thứ tự thời gian để tạo video đầu ra.
+\end{enumerate}
+
+Cơ chế RA-CRF chỉ bổ sung bước tính tỷ lệ ROI và tra bảng chọn CRF, nên không làm thay đổi mô hình PIDNet-L và không yêu cầu huấn luyện lại. Chi phí tính toán bổ sung nhỏ so với toàn bộ pipeline mã hóa--giải mã.

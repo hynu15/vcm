@@ -89,12 +89,12 @@ def select_delta_crf(roi_ratio: float) -> int:
     """Việc 2: rule rời rạc chọn ΔCRF từ roi_ratio của GOP.
 
     roi_ratio < 0.25  → ΔCRF = 5  (ROI nhỏ, ưu tiên mạnh vùng quan trọng)
-    0.25 ≤ roi_ratio ≤ 0.43 → ΔCRF = 3  (ROI trung bình, cân bằng)
-    roi_ratio > 0.43  → ΔCRF = 2  (ROI lớn, giảm chênh lệch tránh tăng bitrate)
+    0.25 ≤ roi_ratio ≤ 0.60 → ΔCRF = 3  (ROI trung bình, cân bằng)
+    roi_ratio > 0.60  → ΔCRF = 2  (ROI lớn, giảm chênh lệch tránh tăng bitrate)
     """
     if roi_ratio < 0.25:
         return 5
-    elif roi_ratio <= 0.43:
+    elif roi_ratio <= 0.60:
         return 3
     else:
         return 2

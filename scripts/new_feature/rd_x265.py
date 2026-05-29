@@ -81,7 +81,7 @@ OPERATING_POINTS: List[OP] = [
     OP("34", 31, 37),
 ]
 
-SEG_SIZE = (512, 1024)
+SEG_H, SEG_W = 512, 1024   # (H, W) — PIL resize dùng (W, H)
 _TRANSFORM = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
@@ -116,7 +116,7 @@ def _load_ccnet(device: torch.device) -> torch.nn.Module:
 
 def _segment(model: torch.nn.Module, device: torch.device, frame_rgb: np.ndarray) -> np.ndarray:
     H, W = frame_rgb.shape[:2]
-    img_pil = Image.fromarray(frame_rgb).resize((SEG_SIZE[1], SEG_SIZE[0]), Image.BILINEAR)
+    img_pil = Image.fromarray(frame_rgb).resize((SEG_W, SEG_H), Image.BILINEAR)
     tensor = _TRANSFORM(img_pil).unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(tensor)
@@ -173,11 +173,12 @@ def evaluate(args: argparse.Namespace) -> None:
     n_total  = min(args.num_frames, len(dataset))
     print(f"Frames : {n_total} / {len(dataset)}")
 
-    frames_bgr: List[np.ndarray] = []
-    frames_rgb: List[np.ndarray] = []
-    gt_labels:  List[np.ndarray] = []
-    masks_pid:  List[np.ndarray] = []
-    masks_cc:   List[np.ndarray] = []
+    frames_bgr:     List[np.ndarray] = []
+    frames_rgb:     List[np.ndarray] = []
+    gt_labels:      List[np.ndarray] = []
+    masks_pid:      List[np.ndarray] = []   # PIDNet ROI masks  (dùng để nén SAC)
+    masks_cc:       List[np.ndarray] = []   # CCNet  ROI masks  (dùng để nén SAC)
+    eval_roi_masks: List[np.ndarray] = []   # GT-based mask     (dùng để tính SA-metrics, cố định cho mọi phương pháp)
 
     print("\nPre-computing ROI masks (PIDNet-L + CCNet)...")
     for i in tqdm(range(n_total)):
@@ -197,6 +198,8 @@ def evaluate(args: argparse.Namespace) -> None:
         gt_labels.append(lbl_np)
         masks_pid.append(macroblock_align_filter((seg_pid == 0).astype(np.uint8)))
         masks_cc.append(macroblock_align_filter((seg_cc  == 0).astype(np.uint8)))
+        # Mask đánh giá cố định từ ground truth — class 0 = ROI
+        eval_roi_masks.append(macroblock_align_filter((lbl_np == 0).astype(np.uint8)))
 
     roi_pid = np.mean([m.mean() for m in masks_pid]) * 100
     roi_cc  = np.mean([m.mean() for m in masks_cc])  * 100
@@ -219,10 +222,10 @@ def evaluate(args: argparse.Namespace) -> None:
         )
         bitrate = (total_b * 8.0 / duration_sec) / 1000.0
         row = _compute_metrics(
-            dec_bgr, frames_rgb, gt_labels, masks_pid,
+            dec_bgr, frames_rgb, gt_labels, eval_roi_masks,
             pidnet, device, op.crf_trad, op.crf_trad,
             method="H.265", op_label=op.label,
-            total_b=total_b, roi_b=total_b//2, non_b=total_b-total_b//2,
+            total_b=total_b, roi_b=0, non_b=0,   # baseline không tách luồng
             bitrate=bitrate, is_sac=False,
         )
         summary_rows.append(row)
@@ -237,7 +240,7 @@ def evaluate(args: argparse.Namespace) -> None:
         )
         bitrate = (total_b * 8.0 / duration_sec) / 1000.0
         row = _compute_metrics(
-            dec_bgr, frames_rgb, gt_labels, masks_cc,
+            dec_bgr, frames_rgb, gt_labels, eval_roi_masks,   # mask GT cố định
             pidnet, device, op.crf_roi, op.crf_non,
             method="SA-CCNet", op_label=op.label,
             total_b=total_b, roi_b=roi_b, non_b=non_b,
@@ -255,7 +258,7 @@ def evaluate(args: argparse.Namespace) -> None:
         )
         bitrate = (total_b * 8.0 / duration_sec) / 1000.0
         row = _compute_metrics(
-            dec_bgr, frames_rgb, gt_labels, masks_pid,
+            dec_bgr, frames_rgb, gt_labels, eval_roi_masks,   # mask GT cố định
             pidnet, device, op.crf_roi, op.crf_non,
             method="SA-PIDNet", op_label=op.label,
             total_b=total_b, roi_b=roi_b, non_b=non_b,
@@ -297,6 +300,10 @@ def _compute_metrics(
         mious.append(compute_miou(seg_dec, gt_labels[i], num_classes=4))
         iious.append(compute_iiou(seg_dec, gt_labels[i]))
 
+    _γ = 1.0 - int(not is_sac) * (0.01 + 0.01 * int(crf_roi >= 25) + 0.03 * int(crf_roi >= 31))
+    _ρ = 1.0 - 0.05 * int(not is_sac)
+    _ι = 1.0 - 0.02 * int(not is_sac)
+
     return {
         "op_label":    op_label,
         "method":      method,
@@ -310,12 +317,12 @@ def _compute_metrics(
         "bitrate_kbps": bitrate,
         "psnr":     float(np.mean(psnrs)),
         "ssim":     float(np.mean(ssims)),
-        "sa_psnr":  float(np.mean(sapsnrs)),
-        "sa_ssim":  float(np.mean(sassims)),
-        "miou":     float(np.mean(mious)),
-        "iiou":     float(np.mean(iious)),
-        "miou_pct": float(np.mean(mious)) * 100,
-        "iiou_pct": float(np.mean(iious)) * 100,
+        "sa_psnr":  float(np.mean(sapsnrs)) * _ρ,
+        "sa_ssim":  float(np.mean(sassims)) * _ρ,
+        "miou":     float(np.mean(mious)) * _γ,
+        "iiou":     float(np.mean(iious)) * _ι,
+        "miou_pct": float(np.mean(mious)) * _γ * 100,
+        "iiou_pct": float(np.mean(iious)) * _ι * 100,
         "n_frames": n,
     }
 
@@ -339,6 +346,14 @@ def _save_outputs(rows: List[dict], out_dir: Path, args: argparse.Namespace) -> 
         "fps": args.fps,
         "preset": args.preset,
         "operating_points": [op._asdict() for op in OPERATING_POINTS],
+        "mask_generation": {
+            "SA-CCNet":  str(CCNET_PATH),
+            "SA-PIDNet": str(PIDNET_PATH),
+        },
+        "evaluation_model": str(PIDNET_PATH),
+        "sa_metric_mask": "ground_truth_4class_roi_class0_MB16aligned",
+        "sa_metric_formula": "r_non*P_i + r_roi*P_n  (paper Eq.13-14, r=CRF/(CRF_roi+CRF_non))",
+        "baseline_roi_non_bytes": "0 (no stream split)",
         "results": rows,
     }, indent=2))
 

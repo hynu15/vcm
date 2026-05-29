@@ -1,0 +1,209 @@
+================================================================================
+GIẢI THÍCH CODE: train_pidnet_l_4class.py
+================================================================================
+File: scripts/train_pidnet_l_4class.py
+Mục đích: Huấn luyện mô hình PIDNet-L cho bài toán phân đoạn ngữ nghĩa 4 lớp
+          trên tập dữ liệu Cityscapes (đã chia lại).
+================================================================================
+
+
+1. TỔNG QUAN
+─────────────────────────────────────────────────────────────────────────────
+File này là script huấn luyện PIDNet-L cho bài toán 4-class thay vì 19-class
+gốc của Cityscapes. Kiến trúc mô hình giữ nguyên hoàn toàn so với bản gốc
+(Xu et al., CVPR 2023), chỉ thay đổi:
+  - Số lớp đầu ra: 19 → 4
+  - Hàm loss: thêm class weights và điều chỉnh threshold cho BAS loss
+  - Tên checkpoint và file ghi metrics
+
+4 lớp được định nghĩa:
+  - Lớp 0 (background/ROI): tất cả các lớp liên quan đến tác vụ lái xe
+    (xe cộ, người đi bộ, mặt đường, biển báo, đèn giao thông, v.v.)
+  - Lớp 1 (sky): bầu trời
+  - Lớp 2 (construction): công trình xây dựng (tường, hàng rào, cầu, ...)
+  - Lớp 3 (nature): thảm thực vật, địa hình
+
+
+2. CẤU TRÚC CHÍNH
+─────────────────────────────────────────────────────────────────────────────
+Script gồm 3 phần chính:
+
+  A. Các hàm tiện ích 4-class:
+       - compute_class_weights()
+       - semantic_loss_4class()
+       - bas_loss_4class()
+
+  B. Vòng lặp huấn luyện: hàm train()
+
+  C. Entry point: khối if __name__ == '__main__'
+
+
+3. CÁC HÀM TIỆN ÍCH
+─────────────────────────────────────────────────────────────────────────────
+
+3.1. compute_class_weights(dataset, num_classes, num_samples=300, device)
+──────────────────────────────────────────────────────────────────────────
+Tính class weights theo phương pháp median-frequency balancing để giải
+quyết vấn đề mất cân bằng giữa các lớp trong ảnh Cityscapes.
+
+Công thức:
+  freq_c = số pixel lớp c / tổng số pixel
+  weight_c = median(freq) / freq_c
+
+Ý nghĩa: lớp hiếm (vehicle, pedestrian chiếm ít pixel) sẽ nhận weight cao,
+giúp model không bị "lazy" chỉ dự đoán background.
+
+Sau khi tính xong, weights được chuẩn hóa sao cho trung bình của các lớp
+có mặt bằng 1.
+
+Tham số:
+  - num_samples=300: chỉ lấy mẫu 300 ảnh ngẫu nhiên để tính nhanh (không
+    duyệt toàn bộ dataset)
+
+3.2. semantic_loss_4class(logits, target, class_weights)
+──────────────────────────────────────────────────────────────────────────
+Cross-entropy loss có class weights. Logits được upsample về đúng kích thước
+nhãn trước khi tính loss (dùng bilinear interpolation).
+
+3.3. bas_loss_4class(main_logits, target, boundary_gt, class_weights, threshold=0.6)
+──────────────────────────────────────────────────────────────────────────
+BAS (Boundary-Aware Segmentation) loss: chỉ tính cross-entropy trên các
+pixel nằm gần đường biên giữa các vùng (boundary pixels).
+
+Khác với bản gốc 19-class dùng threshold=0.8, bản 4-class dùng threshold=0.6.
+Lý do: với 4 lớp boundary xuất hiện ít hơn nên cần threshold thấp hơn để
+bắt đủ hard pixels ở vùng biên.
+
+
+4. HÀM TRAIN() - VÒNG LẶP HUẤN LUYỆN
+─────────────────────────────────────────────────────────────────────────────
+
+4.1. Thiết lập dữ liệu
+──────────────────────────────────────────────────────────────────────────
+Đường dẫn dữ liệu:
+  Train: data/gt_4class/leftImg8bit_trainvaltest/leftImg8bit/train/
+  Val  : data/gt_4class/leftImg8bit_trainvaltest/leftImg8bit/val/
+  (nhãn 4-class đã được tạo sẵn bởi prepare_4class_labels.py)
+
+Data augmentation cho tập train:
+  - RandomHorizontalFlip (p=0.5): lật ngang ngẫu nhiên
+  - ColorJitter: thay đổi độ sáng, tương phản, bão hòa màu
+  - CompressionArtifactAugmentation (p=0.7, quality 35-90): giả lập nhiễu
+    nén JPEG để model robust hơn với ảnh đã qua nén video
+  - Normalize với mean/std của ImageNet
+
+Tập val: chỉ normalize, không augment.
+
+4.2. Kiến trúc mô hình
+──────────────────────────────────────────────────────────────────────────
+Gọi build_pidnet_l(num_classes=4) từ module train_pidnet_l để khởi tạo
+mô hình. PIDNet-L có ~37M tham số, sử dụng 3 nhánh song song:
+  - P-branch: semantic segmentation
+  - I-branch: detail/texture (integral)
+  - D-branch: boundary detection (derivative)
+
+Có kiểm tra forward pass với dummy input (2, 3, H, W) để xác nhận
+shape output trước khi train.
+
+4.3. Optimizer và Learning Rate Schedule
+──────────────────────────────────────────────────────────────────────────
+Optimizer: SGD với momentum=0.9, weight_decay=5e-4, không dùng Nesterov.
+
+LR schedule: poly_lr_with_warmup
+  - Warmup 5 epoch đầu: LR tăng tuyến tính từ 0 → lr_init
+  - Sau warmup: LR giảm theo hàm đa thức (poly decay)
+  Công thức: lr = lr_init * (1 - iter/total_iters)^0.9
+
+Mixed precision training (AMP) được bật tự động nếu có CUDA.
+
+4.4. Hàm loss tổng hợp
+──────────────────────────────────────────────────────────────────────────
+loss = 0.4 * l0  +  20.0 * l1  +  1.0 * l2  +  1.0 * l3
+
+  - l0 (P-branch, weight=0.4): semantic_loss_4class trên output P-branch
+    → hỗ trợ nhánh phụ, weight nhỏ hơn
+  - l1 (D-branch, weight=20.0): boundary_loss trên output D-branch
+    → weight lớn vì boundary prediction quan trọng cho chất lượng biên
+  - l2 (main, weight=1.0): semantic_loss_4class trên output chính
+    → loss phân đoạn chính
+  - l3 (BAS, weight=1.0): bas_loss_4class
+    → tập trung vào hard pixels tại vùng biên
+
+Boundary loss dùng pos_weight thích nghi: pixel boundary hiếm hơn pixel
+nền nên được upweight động dựa trên tỷ lệ boundary trong batch.
+
+Gradient clipping (max_norm=10.0) để ổn định huấn luyện.
+
+4.5. Vòng lặp validation
+──────────────────────────────────────────────────────────────────────────
+Sau mỗi epoch, tính mIoU trên tập val bằng cách tích lũy intersection
+và union qua toàn bộ val set (không chỉ batch cuối).
+
+Đây là cách tính chuẩn xác hơn so với lấy trung bình mIoU per-batch,
+vì tránh bias do kích thước batch không đều.
+
+Per-class IoU được in ra để theo dõi từng lớp riêng biệt.
+
+4.6. Lưu checkpoint
+──────────────────────────────────────────────────────────────────────────
+Chỉ lưu khi mIoU val tốt hơn best hiện tại ("best only" strategy).
+
+Checkpoint bao gồm:
+  - model_state_dict: weights của mô hình
+  - meta: thông tin mô hình (tên, số lớp, best mIoU, epoch tốt nhất)
+
+Lưu tại: models/best_pidnet_l_4class.pth
+
+Ngoài ra ghi thêm:
+  - outputs/metrics/train_metrics_pidnet_l_4class.csv: loss và mIoU per epoch
+  - outputs/metrics/best_result_pidnet_l_4class.json: tóm tắt kết quả tốt nhất
+
+
+5. THAM SỐ MẶC ĐỊNH
+─────────────────────────────────────────────────────────────────────────────
+  --epochs       60        số epoch huấn luyện
+  --batch_size   4         batch size (cần GPU ≥ 8GB cho ảnh 512×1024)
+  --lr           0.01      learning rate ban đầu
+  --image_size   512,1024  kích thước ảnh đầu vào (H, W)
+  --no-class-weights       tắt median-frequency weights (mặc định: bật)
+
+
+6. CÁCH CHẠY
+─────────────────────────────────────────────────────────────────────────────
+# Chạy mặc định (60 epoch, batch=4, có class weights)
+cd /home/huy/sac_project/scripts
+conda run -n sac python3 train_pidnet_l_4class.py
+
+# Tùy chỉnh
+conda run -n sac python3 train_pidnet_l_4class.py \
+    --epochs 80 --batch_size 2 --lr 0.005
+
+# Không dùng class weights
+conda run -n sac python3 train_pidnet_l_4class.py --no-class-weights
+
+
+7. DEPENDENCY
+─────────────────────────────────────────────────────────────────────────────
+Import từ các module nội bộ:
+  - train_segmentation_4class.py : class Cityscapes4Class (dataset loader)
+  - train_segmentation.py        : class CompressionArtifactAugmentation
+  - train_pidnet_l.py            : build_pidnet_l, generate_boundary_gt,
+                                   semantic_loss, boundary_loss, bas_loss,
+                                   poly_lr_with_warmup
+
+Cần chuẩn bị nhãn 4-class trước khi chạy:
+  conda run -n sac python3 prepare_4class_labels.py
+
+
+8. OUTPUT SAU KHI CHẠY
+─────────────────────────────────────────────────────────────────────────────
+  models/best_pidnet_l_4class.pth
+      → checkpoint tốt nhất (dùng cho đánh giá và pipeline SAC)
+
+  outputs/metrics/train_metrics_pidnet_l_4class.csv
+      → lịch sử loss và mIoU theo từng epoch
+
+  outputs/metrics/best_result_pidnet_l_4class.json
+      → tóm tắt: best mIoU, epoch, đường dẫn checkpoint
+
+================================================================================

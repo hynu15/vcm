@@ -1,0 +1,38 @@
+# SAC Pipeline Configuration
+# Semantic-Aware Video Compression (SAC) - Thesis Implementation
+
+dataset:
+  name: cityscapes              # cityscapes | kitti | bdd100k
+  root: /home/huy/sac_project/data/gt_4class
+  frames_dir: /home/huy/sac_project/data/gt_4class/leftImg8bit_trainvaltest/leftImg8bit/val
+  resolution: [1024, 512]       # [width, height] after resize
+
+segmentation:
+  model: pidnet_l               # ccnet | pidnet_l | pidnet_s
+  checkpoint: /home/huy/sac_project/models/best_pidnet_l_4class.pth  # đã có sẵn
+  num_classes: 4                # 4-class: roi, sky, construction, nature
+  roi_class_ids: [0]            # class ids considered as ROI
+  block_size: 16                # macroblock size for block-level mask
+
+compression:
+  codec: libx265                # libx264 | libx265
+  framerate: 30
+  preset: medium
+  gop: 30
+  pix_fmt: yuv420p
+  # CRF pairs (crf_roi, crf_nonroi)
+  crf_pairs:
+    - [19, 25]
+    - [22, 28]
+    - [25, 31]
+    - [28, 34]
+    - [31, 37]
+
+paths:
+  output_root: /home/huy/sac_project/outputs/new
+  masks_dir: masks
+  roi_dir: roi_frames
+  nonroi_dir: nonroi_frames
+  compressed_dir: compressed
+  reconstructed_dir: reconstructed
+  results_csv: results.csv
